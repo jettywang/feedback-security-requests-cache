@@ -14,10 +14,10 @@ from urllib.parse import urlencode
 
 import pytest
 import requests
-from requests import HTTPError, Request, RequestException, Session
+from requests import ConnectionError, HTTPError, Request, RequestException, Session
 from requests.structures import CaseInsensitiveDict
 
-from requests_cache import ALL_METHODS, CachedSession
+from requests_cache import ALL_METHODS, CachedSession, FailureKind
 from requests_cache._utils import get_placeholder_class
 from requests_cache.backends import BACKEND_CLASSES, BaseCache
 from requests_cache.backends.base import DESERIALIZE_ERRORS
@@ -585,6 +585,63 @@ def test_stale_if_error__max_stale(url, mock_session):
     mock_session.settings.stale_if_error = 5
     with pytest.raises(HTTPError):
         mock_session.get(url)
+
+
+def test_stale_if_error_kinds(mock_session):
+    """With stale_if_error_kinds, only the specified failure kinds should serve stale data.
+    Uses the same expired cache record across transport errors, server errors, and refusals.
+    """
+    url = f'{MOCKED_URL}/failure-kinds'
+    mock_session.settings.stale_if_error = True
+    mock_session.settings.stale_if_error_kinds = {
+        FailureKind.TRANSPORT,
+        FailureKind.SERVER_ERROR,
+    }
+    mock_session.settings.allowable_codes = (200,)
+    mock_session.settings.expire_after = utcnow() - timedelta(seconds=10)
+
+    mock_session.mock_adapter.register_uri('GET', url, text='cached content')
+    assert mock_session.get(url).from_cache is False
+
+    # The same record is now expired for all subsequent attempts
+    # Transport error: serve stale data
+    mock_session.mock_adapter.register_uri('GET', url, exc=ConnectionError)
+    response = mock_session.get(url)
+    assert response.from_cache is True and response.is_expired is True
+    assert response.text == 'cached content'
+
+    # Server error (5xx): serve stale data
+    mock_session.mock_adapter.register_uri('GET', url, status_code=500)
+    response = mock_session.get(url)
+    assert response.from_cache is True and response.is_expired is True
+    assert response.text == 'cached content'
+
+    # Explicit refusal (4xx): return the refusal response as-is, not stale data
+    mock_session.mock_adapter.register_uri('GET', url, status_code=403)
+    response = mock_session.get(url)
+    assert response.status_code == 403
+    assert response.from_cache is False
+
+    # Unhandled exception type: re-raise instead of serving stale data
+    mock_session.mock_adapter.register_uri('GET', url, text='new content')
+    with patch.object(mock_session.cache, 'save_response', side_effect=ValueError):
+        with pytest.raises(ValueError):
+            mock_session.get(url)
+
+
+def test_stale_if_error_kinds__default_allows_all_failures(mock_session):
+    """Without stale_if_error_kinds (default), any failure kind qualifies for stale data"""
+    url = f'{MOCKED_URL}/failure-kinds-default'
+    mock_session.settings.stale_if_error = True
+    mock_session.settings.allowable_codes = (200,)
+    mock_session.settings.expire_after = utcnow() - timedelta(seconds=10)
+
+    mock_session.mock_adapter.register_uri('GET', url, text='cached content')
+    assert mock_session.get(url).from_cache is False
+
+    mock_session.mock_adapter.register_uri('GET', url, status_code=403)
+    response = mock_session.get(url)
+    assert response.from_cache is True and response.is_expired is True
 
 
 def test_stale_if_error__response_header(mock_session):

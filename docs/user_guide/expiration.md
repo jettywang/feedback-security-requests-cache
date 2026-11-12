@@ -130,6 +130,29 @@ In addition to HTTP error codes, `stale_if_error` also applies to python excepti
 [Errors and Exceptions](https://requests.readthedocs.io/en/latest/user/quickstart/#errors-and-exceptions)
 for more details on request errors in general.
 
+### Classifying Failures
+By default, any failure qualifies for stale data. If you want to serve stale data only for some
+kinds of failures, use `stale_if_error_kinds`. For example, you may want to use stale data when the
+server is briefly unreachable or returning 5xx errors, but not when it explicitly refuses the
+request (e.g., a 403 for a deactivated account):
+```python
+>>> from requests_cache import CachedSession, FailureKind
+>>> session = CachedSession(
+...     stale_if_error=True,
+...     stale_if_error_kinds={FailureKind.TRANSPORT, FailureKind.SERVER_ERROR},
+... )
+```
+
+The available kinds are:
+
+* `FailureKind.TRANSPORT`: The request raised a transport-level exception (e.g., connection error
+  or timeout), so no response was received
+* `FailureKind.SERVER_ERROR`: The server returned a 5xx response
+* `FailureKind.REFUSAL`: The server explicitly refused the request with a 4xx response
+
+Failures of any other kind keep their default behavior: a refusal response is returned as-is, and
+an unclassified exception is re-raised.
+
 (reset)=
 ## Resetting Expiration
 Changing the session's expiration settings does not apply retroactively.

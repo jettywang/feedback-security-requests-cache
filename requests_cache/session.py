@@ -21,8 +21,10 @@ from .policy import (
     CacheSettings,
     ExpirationPatterns,
     ExpirationTime,
+    FailureKind,
     FilterCallback,
     KeyCallback,
+    classify_failure,
     set_request_headers,
 )
 from .serializers import SerializerType
@@ -59,6 +61,7 @@ class CacheMixin(MIXIN_BASE):
         key_fn: Optional[KeyCallback] = None,
         read_only: bool = False,
         stale_if_error: Union[bool, int] = False,
+        stale_if_error_kinds: Optional[Iterable[FailureKind]] = None,
         autoclose: bool = True,
         **kwargs,
     ):
@@ -77,6 +80,7 @@ class CacheMixin(MIXIN_BASE):
             key_fn=key_fn,
             read_only=read_only,
             stale_if_error=stale_if_error,
+            stale_if_error_kinds=stale_if_error_kinds,
             autoclose=autoclose,
             **kwargs,
         )
@@ -318,10 +322,23 @@ class CacheMixin(MIXIN_BASE):
                 actions._stale_if_error
                 and response.status_code not in self.settings.allowable_codes
             ):
-                response.raise_for_status()
+                kind = classify_failure(response=response)
+                if kind is not None and self._failure_kind_allowed(kind):
+                    response.raise_for_status()
+                # Otherwise, this failure kind isn't eligible for stale data; return the
+                # response (e.g., an explicit refusal) as-is
             return response
-        except Exception:
-            return self._handle_error(cached_response, actions)
+        except Exception as e:
+            if self._failure_kind_allowed(classify_failure(error=e)):
+                return self._handle_error(cached_response, actions)
+            raise
+
+    def _failure_kind_allowed(self, kind: Optional[FailureKind]) -> bool:
+        """Determine if a failure kind qualifies for stale-if-error. All kinds qualify if
+        ``stale_if_error_kinds`` is not set.
+        """
+        kinds = self.settings.stale_if_error_kinds
+        return kinds is None or (kind is not None and kind in kinds)
 
     def _resend_async(self, *args, **kwargs):
         """Send a non-blocking request to refresh a cached response"""
@@ -409,6 +426,10 @@ class CachedSession(CacheMixin, OriginalSession):
         read_only: Read existing cached responses, but do not write any new responses to the cache
         stale_if_error: Return a stale response if a new request raises an exception. Optionally
             accepts a time value representing maximum staleness to accept.
+        stale_if_error_kinds: Optionally limit ``stale_if_error`` to specific
+            :py:class:`.FailureKind` values (e.g., serve stale data for transport errors and
+            5xx server errors, but not for 4xx refusals). Failures of any other kind keep
+            their default behavior.
         stale_while_revalidate: Return a stale response initially, while a non-blocking request is
             sent to refresh the response for the next time it's requested
         autoclose: Close the cache backend when the session is closed

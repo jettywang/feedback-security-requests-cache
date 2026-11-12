@@ -5,6 +5,7 @@ from attrs import define, field
 from .._utils import get_valid_kwargs
 from ..models import RichMixin
 from . import ExpirationPattern, ExpirationTime, FilterCallback, KeyCallback
+from .failures import FailureKind
 
 ALL_METHODS = ('GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE')
 DEFAULT_CACHE_NAME = 'http_cache'
@@ -47,6 +48,7 @@ class CacheSettings(RichMixin):
     only_if_cached: bool = field(default=False)
     read_only: bool = field(default=False)
     stale_if_error: Union[bool, ExpirationTime] = field(default=False)
+    stale_if_error_kinds: Optional[Iterable[FailureKind]] = field(default=None)
     stale_while_revalidate: Union[bool, ExpirationTime] = field(default=False)
     urls_expire_after: Dict[ExpirationPattern, ExpirationTime] = field(factory=dict)
 
