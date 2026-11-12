@@ -640,6 +640,56 @@ def test_update_revalidated_response__skip_write(read_only, headers_changed, exp
     assert actions.skip_write is expected_skip_write
 
 
+def test_update_revalidated_response__no_store():
+    """A no-store directive introduced by the 304 must block the cache write and mark the
+    previously stored response for eviction, while still updating the returned response"""
+    actions = CacheActions.from_request('key', BASIC_REQUEST, CacheSettings(cache_control=True))
+    cached_response = create_mock_response(headers={'ETag': ETAG})
+    new_response = create_mock_response(
+        status_code=304, headers={'ETag': ETAG, 'Cache-Control': 'no-store'}
+    )
+
+    result = actions.update_revalidated_response(new_response, cached_response)
+
+    assert actions.skip_write is True
+    assert actions._evict_cached_response is True
+    assert result is cached_response
+    assert result.headers['Cache-Control'] == 'no-store'
+    assert result.revalidated is True
+
+
+def test_update_revalidated_response__no_store_read_only():
+    """read_only also blocks the write; the eviction flag is still set so the session can decide
+    not to modify the read-only cache"""
+    actions = CacheActions.from_request(
+        'key', BASIC_REQUEST, CacheSettings(cache_control=True, read_only=True)
+    )
+    cached_response = create_mock_response(headers={'ETag': ETAG})
+    new_response = create_mock_response(
+        status_code=304, headers={'ETag': ETAG, 'Cache-Control': 'no-store'}
+    )
+
+    actions.update_revalidated_response(new_response, cached_response)
+
+    assert actions.skip_write is True
+    assert actions._evict_cached_response is True
+
+
+def test_update_revalidated_response__no_store_without_cache_control():
+    """Without cache_control, a no-store on the 304 is ignored like other response directives"""
+    actions = CacheActions.from_request('key', BASIC_REQUEST, CacheSettings(cache_control=False))
+    cached_response = create_mock_response(headers={'ETag': ETAG})
+    new_response = create_mock_response(
+        status_code=304, headers={'ETag': ETAG, 'Cache-Control': 'no-store'}
+    )
+
+    actions.update_revalidated_response(new_response, cached_response)
+
+    # The directive is ignored, so the changed headers would still be written (existing behavior)
+    assert actions.skip_write is False
+    assert actions._evict_cached_response is False
+
+
 def test_update_revalidated_response__transfer_encoding():
     """When updating response headers after revalidating a cached response,
     don't set both `Content-Length` and `Transfer-Encoding`

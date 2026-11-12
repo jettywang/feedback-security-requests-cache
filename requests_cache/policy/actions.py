@@ -74,6 +74,7 @@ class CacheActions(RichMixin):
     _settings: CacheSettings = field(default=None, repr=False)
 
     # Temporary attributes
+    _evict_cached_response: bool = field(default=False, repr=False)
     _only_if_cached: bool = field(default=False, repr=False)
     _refresh: bool = field(default=False, repr=False)
     _request: PreparedRequest = field(default=None, repr=False)
@@ -279,6 +280,13 @@ class CacheActions(RichMixin):
         """After revalidation, update the cached response's expiration and headers"""
         logger.debug(f'Response for URL {response.request.url} has not been modified')
 
+        # A 304 may introduce directives (e.g. no-store) that were absent from the originally
+        # cached response. In that case the updated response must not be stored, and the
+        # previously stored copy has to be evicted (RFC 9111, sections 3.6 and 4.3.4).
+        revalidation_directives = CacheDirectives.from_headers(response.headers)
+        revalidation_no_store = self._settings.cache_control and revalidation_directives.no_store
+        self._evict_cached_response = revalidation_no_store
+
         # Skip updating the cached response if expiration and headers are unchanged
         # OR if session/request settings skip it.
         # Ignore validators missing from new response, since they may be omitted
@@ -287,7 +295,10 @@ class CacheActions(RichMixin):
         )
         expiration_changed = self.expires != cached_response.expires
         permanent_skip = (
-            self._settings.read_only or self._settings.disabled or self._directives.no_store
+            self._settings.read_only
+            or self._settings.disabled
+            or self._directives.no_store
+            or revalidation_no_store
         )
         self.skip_write = permanent_skip or not (expiration_changed or headers_changed)
 

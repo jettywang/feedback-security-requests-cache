@@ -290,6 +290,17 @@ class CacheMixin(MIXIN_BASE):
             cached_response.cache_key = actions.cache_key
             if not actions.skip_write:
                 self.cache.save_response(cached_response, actions.cache_key, actions.expires)  # type: ignore[unreachable]
+            elif (
+                actions._evict_cached_response
+                and not self.settings.read_only
+                and not self.settings.disabled
+            ):
+                # The revalidation response changed the policy to no-store: the caller still
+                # gets the revalidated content, but no copy may remain in the cache
+                logger.debug(
+                    f'Deleting cached response for URL {request.url} after no-store revalidation'
+                )
+                self.cache.delete(actions.cache_key)
             return cached_response
         else:
             logger.debug(f'Skipping cache write for URL: {request.url}')

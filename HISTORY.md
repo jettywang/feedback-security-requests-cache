@@ -1,6 +1,7 @@
 # History
 
 ## Unreleased
+* Evict a previously cached response when a `304 Not Modified` revalidation introduces `Cache-Control: no-store`; the revalidated content is still returned to the caller, but no copy remains in the cache for later requests
 * Fix `ValueError` when a response has an invalid `Expires` date (for example `Expires: garbage`); it is now treated as already expired
 * Fix JSON refresh comparisons for mixed-case `Content-Type` values
 * Keep caller-supplied MongoDB clients open when closing MongoDB or GridFS caches

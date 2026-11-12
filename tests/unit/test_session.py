@@ -904,6 +904,117 @@ def test_304_not_modified(
     assert response.from_cache is expected_from_cache
 
 
+def test_304_revalidation__normal_hit(mock_session):
+    """A plain 304 revalidation returns the cached content and keeps the stored copy, so the
+    following request is still a cache hit without contacting the origin again"""
+    url = f'{MOCKED_URL}/revalidate-unchanged'
+    mock_session.settings.cache_control = True
+    mock_session.mock_adapter.register_uri(
+        'GET', url, status_code=200, text='v1 payload', headers={'ETag': '"v1"'}
+    )
+    initial = mock_session.get(url)
+    assert mock_session.cache.contains(url=url)
+
+    mock_session.mock_adapter.register_uri('GET', url, status_code=304, headers={'ETag': '"v1"'})
+    revalidated = mock_session.get(url, refresh=True)
+
+    assert revalidated.from_cache is True
+    assert revalidated.revalidated is True
+    assert revalidated.text == initial.text
+    assert mock_session.cache.contains(url=url)
+    assert mock_session.mock_adapter.call_count == 2
+
+    # The stored copy remains usable: the next request does not reach the adapter
+    next_response = mock_session.get(url)
+    assert next_response.from_cache is True
+    assert next_response.text == initial.text
+    assert mock_session.mock_adapter.call_count == 2
+
+
+def test_304_revalidation__no_store_evicts_cached_response(mock_session):
+    """If a 304 revalidation switches the policy to no-store, the caller still receives the
+    revalidated content, but the cached copy must be deleted so later requests go to the origin"""
+    url = f'{MOCKED_URL}/revalidate-no-store'
+    mock_session.settings.cache_control = True
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        url,
+        status_code=200,
+        text='v1 payload',
+        headers={'ETag': '"v1"', 'Cache-Control': 'max-age=0'},
+    )
+    initial = mock_session.get(url)
+    assert mock_session.cache.contains(url=url)
+
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        url,
+        status_code=304,
+        headers={'ETag': '"v1"', 'Cache-Control': 'no-store'},
+    )
+    revalidated = mock_session.get(url)
+    adapter_calls_after_revalidation = mock_session.mock_adapter.call_count
+
+    # The revalidated content is returned to the caller, but no copy stays on disk
+    assert revalidated.from_cache is True
+    assert revalidated.revalidated is True
+    assert revalidated.text == initial.text
+    assert mock_session.cache.contains(url=url) is False
+    assert adapter_calls_after_revalidation == 2
+
+    # No disk copy remains: the next request must contact the origin again
+    next_response = mock_session.get(url)
+    assert next_response.from_cache is False
+    assert mock_session.mock_adapter.call_count == adapter_calls_after_revalidation + 1
+    assert mock_session.cache.contains(url=url) is False
+
+
+def test_304_revalidation__no_store_read_only_keeps_cache(mock_session):
+    """A read-only cache must not be modified, so a no-store 304 cannot evict the stored copy"""
+    url = f'{MOCKED_URL}/revalidate-no-store-read-only'
+    mock_session.settings.cache_control = True
+    mock_session.mock_adapter.register_uri(
+        'GET', url, status_code=200, text='v1 payload', headers={'ETag': '"v1"'}
+    )
+    initial = mock_session.get(url)
+
+    mock_session.settings.read_only = True
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        url,
+        status_code=304,
+        headers={'ETag': '"v1"', 'Cache-Control': 'no-store'},
+    )
+    revalidated = mock_session.get(url, refresh=True)
+
+    assert revalidated.from_cache is True
+    assert revalidated.text == initial.text
+    assert mock_session.cache.contains(url=url) is True
+
+
+def test_304_revalidation__no_store_ignored_without_cache_control(mock_session):
+    """Without cache_control, response Cache-Control directives are not honored, so a no-store
+    304 should keep the existing revalidation behavior"""
+    url = f'{MOCKED_URL}/revalidate-no-store-ignored'
+    mock_session.settings.cache_control = False
+    mock_session.mock_adapter.register_uri(
+        'GET', url, status_code=200, text='v1 payload', headers={'ETag': '"v1"'}
+    )
+    initial = mock_session.get(url)
+
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        url,
+        status_code=304,
+        headers={'ETag': '"v1"', 'Cache-Control': 'no-store'},
+    )
+    revalidated = mock_session.get(url, refresh=True)
+
+    assert revalidated.from_cache is True
+    assert revalidated.text == initial.text
+    assert mock_session.cache.contains(url=url) is True
+
+
 def test_has_content_changed__without_new_content(mock_session):
     initial_response = mock_session.get(MOCKED_URL)
     cached_response = mock_session.get(MOCKED_URL)

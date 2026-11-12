@@ -71,7 +71,9 @@ The following headers are currently supported:
 - `Cache-Control: max-age`: Used as the expiration time in seconds
 - `Cache-Control: must-revalidate`: When used in combination with `max-age=0`, revalidate immediately.
 - `Cache-Control: no-cache`: Revalidate with the server before using a cached response
-- `Cache-Control: no-store` Skip writing to the cache
+- `Cache-Control: no-store` Skip writing to the cache. If received on a `304 Not Modified`
+  revalidation of a previously cached response, the revalidated content is still returned for the
+  current request, but the cached copy is deleted so later requests go back to the server
 - `Cache-Control: stale-if-error`: Same behavior as request header
 - `Cache-Control: stale-while-revalidate`: If expired by less than this many seconds, return the stale response immediately and send an asynchronous revalidation request
 - `Expires`: Used as an absolute expiration datetime

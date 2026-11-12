@@ -291,3 +291,21 @@ Key points:
 :lines: 7-
 ```
 :::
+
+
+### Revalidation with `no-store`
+```{include} ../examples/revalidation_no_store.py
+:start-line: 2
+:end-line: 11
+```
+
+:::{dropdown} Example
+:animate: fade-in-slide-down
+:color: primary
+:icon: file-code
+
+[revalidation_no_store.py](https://github.com/requests-cache/requests-cache/blob/main/examples/revalidation_no_store.py)
+```{literalinclude} ../examples/revalidation_no_store.py
+:lines: 13-
+```
+:::
