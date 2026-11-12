@@ -38,6 +38,8 @@ __all__ = [
     'normalize_request',
     'normalize_params',
     'normalize_url',
+    'project_response',
+    'redact_response',
 ]
 if TYPE_CHECKING:
     from .models import AnyPreparedRequest, AnyRequest, CachedResponse
@@ -249,6 +251,95 @@ def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> 
         )
         response.request.body = normalize_body(response.request, ignored_parameters)
     return response
+
+
+def project_response(
+    response: 'CachedResponse',
+    allowed_fields: Optional[Iterable[str]],
+    match_headers: Union[ParamList, bool] = False,
+) -> 'CachedResponse':
+    """Project cached request data down to the request fields selected via
+    ``serializable_request_fields``, before the response is written to the cache.
+
+    Cache keys are always computed from the live request before this projection, so request matching
+    is unaffected. Headers (and cookies) required to evaluate ``Vary`` and session-level
+    ``match_headers`` are retained even when ``headers``/``cookies`` are not selected, so cached
+    responses can still be selected correctly after the cache is reopened.
+
+    Args:
+        response: Cached response whose request data will be projected in-place
+        allowed_fields: Names of :class:`.CachedRequest` fields that may be serialized
+        match_headers: Session-level headers that participate in request matching
+    """
+    if not allowed_fields:
+        return response
+    allowed = set(allowed_fields)
+    required_headers, keep_cookies = _required_request_headers(response, match_headers)
+
+    response.request = _project_request(response.request, allowed, required_headers, keep_cookies)
+    if response._next is not None:
+        response._next = _project_request(
+            response._next, allowed, required_headers, keep_cookies
+        )
+    response.history = [
+        project_response(redirect, allowed_fields, match_headers)
+        for redirect in response.history
+    ]
+    return response
+
+
+def _project_request(
+    request: 'CachedRequest',
+    allowed_fields: set,
+    required_headers: set,
+    keep_cookies: bool,
+) -> 'CachedRequest':
+    """Return a copy of a cached request containing only the selected fields, plus any headers and
+    cookies required for Vary/match_headers validation"""
+    kwargs = {}
+    if 'method' in allowed_fields:
+        kwargs['method'] = request.method
+    if 'url' in allowed_fields:
+        kwargs['url'] = request.url
+    if 'body' in allowed_fields:
+        kwargs['body'] = request.body
+    if 'cookies' in allowed_fields or keep_cookies:
+        kwargs['cookies'] = request.cookies
+    if 'headers' in allowed_fields:
+        kwargs['headers'] = CaseInsensitiveDict(request.headers)
+    elif required_headers:
+        if '*' in required_headers:
+            kwargs['headers'] = CaseInsensitiveDict(request.headers)
+        else:
+            kwargs['headers'] = CaseInsensitiveDict(
+                {k: v for k, v in request.headers.items() if k.lower() in required_headers}
+            )
+    return request.__class__(**kwargs)
+
+
+def _required_request_headers(
+    response: 'CachedResponse', match_headers: Union[ParamList, bool]
+) -> Tuple[set, bool]:
+    """Collect header names (lowercase) that must remain on a cached request to preserve Vary and
+    match_headers behavior. Returns the header names and whether cookies must also be retained."""
+    required = set()
+    keep_cookies = False
+
+    vary = response.headers.get('Vary')
+    if vary and vary != '*':
+        vary_headers = {h.strip().lower() for h in vary.split(',') if h.strip()}
+        if 'cookie' in vary_headers:
+            keep_cookies = True
+            vary_headers.discard('cookie')
+        required |= vary_headers
+
+    if match_headers is True:
+        # All headers participate in matching, so none can be dropped
+        required = {'*'}
+    elif match_headers:
+        required |= {h.lower() for h in match_headers}
+
+    return required, keep_cookies
 
 
 def filter_sort_json(data: Union[List, Mapping], ignored_parameters: ParamList):

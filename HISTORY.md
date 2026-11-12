@@ -1,6 +1,7 @@
 # History
 
 ## Unreleased
+* Add `serializable_request_fields` session setting to select which request metadata (`method`, `url`, `headers`, `cookies`, `body`) is persisted with cached responses; headers and cookies needed for `Vary`/`match_headers` validation are always retained
 * Fix `ValueError` when a response has an invalid `Expires` date (for example `Expires: garbage`); it is now treated as already expired
 * Fix JSON refresh comparisons for mixed-case `Content-Type` values
 * Keep caller-supplied MongoDB clients open when closing MongoDB or GridFS caches

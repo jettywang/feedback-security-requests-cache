@@ -15,8 +15,11 @@ from requests_cache.cache_keys import (
     create_key,
     normalize_headers,
     normalize_request,
+    project_response,
     redact_response,
 )
+from requests_cache.models import CachedRequest, CachedResponse
+from requests.structures import CaseInsensitiveDict
 
 CACHE_KEY = 'e25f7e6326966e82'
 
@@ -260,3 +263,135 @@ def test_remove_ignored_headers__empty():
         headers={'foo': 'bar'},
     )
     assert normalize_request(request.prepare(), ignored_parameters=None).headers == request.headers
+
+
+def _make_cached_response(
+    url='https://example.com/test',
+    request_headers=None,
+    response_headers=None,
+    body=b'{"secret": "payload"}',
+):
+    request = CachedRequest(
+        method='POST',
+        url=url,
+        body=body,
+        headers=CaseInsensitiveDict(
+            request_headers
+            or {
+                'Authorization': 'Bearer token',
+                'Accept': 'application/json',
+                'User-Agent': 'test-client',
+            }
+        ),
+    )
+    return CachedResponse(
+        status_code=200,
+        url=url,
+        request=request,
+        headers=CaseInsensitiveDict(response_headers or {}),
+    )
+
+
+def test_project_response__no_settings_is_noop():
+    response = _make_cached_response()
+    projected = project_response(response, None)
+    assert projected is response
+    assert projected.request.headers['Authorization'] == 'Bearer token'
+    assert projected.request.body == b'{"secret": "payload"}'
+
+
+def test_project_response__keeps_only_selected_fields():
+    response = _make_cached_response()
+    projected = project_response(response, ['method', 'url'])
+    assert projected.request.method == 'POST'
+    assert projected.request.url == 'https://example.com/test'
+    # Non-selected metadata is dropped from the serialized request
+    assert dict(projected.request.headers) == {}
+    assert projected.request.body == b''
+    assert len(projected.request.cookies) == 0
+
+
+def test_project_response__retains_vary_headers_without_full_headers():
+    # A response varying on Accept must keep Accept on the request even when headers
+    # aren't in the selected fields, so Vary validation still works after reopening
+    response = _make_cached_response(response_headers={'Vary': 'Accept'})
+    projected = project_response(response, ['method', 'url'])
+    assert dict(projected.request.headers) == {'Accept': 'application/json'}
+
+
+def test_project_response__retains_match_headers():
+    response = _make_cached_response()
+    projected = project_response(response, ['method', 'url'], match_headers=['Accept'])
+    assert dict(projected.request.headers) == {'Accept': 'application/json'}
+
+
+def test_project_response__match_all_headers_retains_everything():
+    response = _make_cached_response()
+    projected = project_response(response, ['method', 'url'], match_headers=True)
+    assert projected.request.headers == CaseInsensitiveDict(
+        {
+            'Authorization': 'Bearer token',
+            'Accept': 'application/json',
+            'User-Agent': 'test-client',
+        }
+    )
+
+
+def test_project_response__vary_cookie_retains_cookies():
+    from requests.cookies import RequestsCookieJar
+
+    jar = RequestsCookieJar()
+    jar.set('session', 'abc123', domain='example.com', path='/')
+    request = CachedRequest(
+        method='GET',
+        url='https://example.com/test',
+        cookies=jar,
+        headers=CaseInsensitiveDict({'User-Agent': 'test-client'}),
+    )
+    response = CachedResponse(
+        status_code=200,
+        url='https://example.com/test',
+        request=request,
+        headers=CaseInsensitiveDict({'Vary': 'Cookie'}),
+    )
+    projected = project_response(response, ['method', 'url'])
+    assert projected.request.cookies.get('session') == 'abc123'
+    assert dict(projected.request.headers) == {}
+
+
+def test_project_response__selected_body_and_headers():
+    response = _make_cached_response()
+    projected = project_response(response, ['method', 'url', 'body', 'headers'])
+    assert projected.request.body == b'{"secret": "payload"}'
+    assert projected.request.headers['Authorization'] == 'Bearer token'
+
+
+def test_project_response__preserves_vary_key_inputs():
+    # The retained Vary header must still match on the same terms as the live request,
+    # so Vary validation keeps working after the projected response is reopened
+    from requests_cache.cache_keys import get_matched_headers
+
+    response = _make_cached_response(response_headers={'Vary': 'Accept'})
+    live_request = response.request.copy()
+    projected = project_response(response, ['method', 'url'])
+    assert get_matched_headers(projected.request.headers, ['accept']) == get_matched_headers(
+        live_request.headers, ['accept']
+    )
+
+
+def test_project_response__redirect_history():
+    target = _make_cached_response(
+        url='https://example.com/target',
+        request_headers={'Accept': 'text/html', 'Authorization': 'Bearer token'},
+        response_headers={'Vary': 'Accept'},
+    )
+    redirect = _make_cached_response(
+        url='https://example.com/redirect',
+        request_headers={'Authorization': 'Bearer token'},
+        response_headers={'Location': 'https://example.com/target'},
+        body=b'',
+    )
+    target.history = [redirect]
+    projected = project_response(target, ['method', 'url'])
+    assert dict(projected.request.headers) == {'Accept': 'text/html'}
+    assert dict(projected.history[0].request.headers) == {}

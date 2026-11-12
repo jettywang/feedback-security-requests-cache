@@ -3,13 +3,16 @@ from typing import Dict, Iterable, Optional, Union
 from attrs import define, field
 
 from .._utils import get_valid_kwargs
-from ..models import RichMixin
+from ..models import CachedRequest, RichMixin
 from . import ExpirationPattern, ExpirationTime, FilterCallback, KeyCallback
 
 ALL_METHODS = ('GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE')
 DEFAULT_CACHE_NAME = 'http_cache'
 DEFAULT_METHODS = ('GET', 'HEAD')
 DEFAULT_STATUS_CODES = (200,)
+
+# Fields of CachedRequest that can be selected for serialization via serializable_request_fields
+REQUEST_FIELDS = tuple(a.name for a in CachedRequest.__attrs_attrs__)
 
 # Common auth headers and params that are excluded from cache keys and redacted from cached responses
 AUTH_HEADERS = (
@@ -46,9 +49,21 @@ class CacheSettings(RichMixin):
     match_headers: Union[Iterable[str], bool] = field(default=False)
     only_if_cached: bool = field(default=False)
     read_only: bool = field(default=False)
+    serializable_request_fields: Optional[Iterable[str]] = field(default=None)
     stale_if_error: Union[bool, ExpirationTime] = field(default=False)
     stale_while_revalidate: Union[bool, ExpirationTime] = field(default=False)
     urls_expire_after: Dict[ExpirationPattern, ExpirationTime] = field(factory=dict)
+
+    def __attrs_post_init__(self):
+        if self.serializable_request_fields is None:
+            return
+        invalid = set(self.serializable_request_fields) - set(REQUEST_FIELDS)
+        if invalid:
+            raise ValueError(
+                f'Invalid serializable_request_fields: {sorted(invalid)}. '
+                f'Valid fields are: {list(REQUEST_FIELDS)}'
+            )
+        self.serializable_request_fields = tuple(self.serializable_request_fields)
 
     @classmethod
     def from_kwargs(cls, **kwargs):

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from requests import Request, Response
 
-from ..cache_keys import create_key, redact_response
+from ..cache_keys import create_key, project_response, redact_response
 from ..models import AnyRequest, CachedResponse
 from ..policy import DEFAULT_CACHE_NAME, CacheSettings, ExpirationTime
 from ..serializers import SerializerType, init_serializer
@@ -100,6 +100,11 @@ class BaseCache:
         cache_key = cache_key or self.create_key(response.request)
         cached_response = CachedResponse.from_response(response, expires=expires)
         cached_response = redact_response(cached_response, self._settings.ignored_parameters)
+        cached_response = project_response(
+            cached_response,
+            self._settings.serializable_request_fields,
+            self._settings.match_headers,
+        )
         self.responses[cache_key] = cached_response
 
         # Save redirect aliases, unless this is a revalidation (i.e., it was saved previously)

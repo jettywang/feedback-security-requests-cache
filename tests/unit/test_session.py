@@ -32,6 +32,7 @@ from requests_cache.policy import (
 from requests_cache.policy.actions import METHOD_OVERRIDE_HEADERS
 from requests_cache.session import OriginalSession
 from tests.conftest import (
+    ETAG,
     MOCKED_URL,
     MOCKED_URL_200_404,
     MOCKED_URL_404,
@@ -477,6 +478,118 @@ def test_include_get_headers():
     """include_get_headers is aliased to match_headers for backwards-compatibility"""
     session = CachedSession(include_get_headers=True, backend='memory')
     assert session.settings.match_headers is True
+
+
+# Serializable request field projection
+# -----------------------------------------------------
+
+
+def test_serializable_request_fields__invalid_field():
+    with pytest.raises(ValueError):
+        CachedSession(backend='memory', serializable_request_fields=['not_a_field'])
+
+
+def test_serializable_request_fields__default_stores_everything(mock_session):
+    mock_session.get(MOCKED_URL, headers={'X-Trace': 'abc'})
+    cached = mock_session.cache.get_response(mock_session.cache.create_key(
+        Request('GET', MOCKED_URL).prepare()
+    ))
+    assert cached.request.headers['X-Trace'] == 'abc'
+
+
+def test_serializable_request_fields__projects_cached_request(mock_session):
+    """Only selected request metadata is persisted; ordinary requests still return and hit normally"""
+    mock_session.settings.serializable_request_fields = ['method', 'url']
+    headers = {'Authorization': 'Bearer secret', 'X-Trace': 'abc', 'Accept': 'text/plain'}
+
+    response_1 = mock_session.get(MOCKED_URL, headers=headers)
+    response_2 = mock_session.get(MOCKED_URL, headers=headers)
+    assert response_1.from_cache is False
+    assert response_2.from_cache is True
+    assert response_2.text == 'mock response'
+
+    cached = mock_session.cache.get_response(
+        mock_session.cache.create_key(Request('GET', MOCKED_URL).prepare())
+    )
+    assert cached.request.method == 'GET'
+    assert cached.request.url
+    assert dict(cached.request.headers) == {}
+    assert cached.request.body == b''
+    assert len(cached.request.cookies) == 0
+
+
+def test_serializable_request_fields__retains_vary_headers(mock_session):
+    """Headers named by Vary must survive projection so Vary selection still works"""
+    mock_session.settings.serializable_request_fields = ['method', 'url']
+    headers_json = {'Accept': 'application/json', 'Authorization': 'Bearer secret'}
+    headers_html = {'Accept': 'text/html', 'Authorization': 'Bearer secret'}
+
+    assert mock_session.get(MOCKED_URL_VARY, headers=headers_json).from_cache is False
+    cached = mock_session.cache.get_response(
+        mock_session.cache.create_key(Request('GET', MOCKED_URL_VARY).prepare())
+    )
+    # Sensitive header dropped, but the Vary-named header is retained
+    assert dict(cached.request.headers) == {'Accept': 'application/json'}
+
+    assert mock_session.get(MOCKED_URL_VARY, headers=headers_json).from_cache is True
+    assert mock_session.get(MOCKED_URL_VARY, headers=headers_html).from_cache is False
+    assert mock_session.get(MOCKED_URL_VARY, headers=headers_html).from_cache is True
+
+
+def test_serializable_request_fields__retains_match_headers(mock_session):
+    """Session-level match_headers must remain usable for matching after projection"""
+    mock_session.settings.serializable_request_fields = ['method', 'url']
+    mock_session.settings.match_headers = ['Accept']
+    headers_1 = {'Accept': 'application/json', 'Authorization': 'Bearer secret'}
+    headers_2 = {'Accept': 'text/plain', 'Authorization': 'Bearer secret'}
+
+    mock_session.get(MOCKED_URL, headers=headers_1)
+    cached = next(iter(mock_session.cache.responses.values()))
+    assert dict(cached.request.headers) == {'Accept': 'application/json'}
+    assert mock_session.get(MOCKED_URL, headers=headers_1).from_cache is True
+    assert mock_session.get(MOCKED_URL, headers=headers_2).from_cache is False
+
+
+def test_serializable_request_fields__persistence_and_reopen(tempfile_path):
+    """A reopened SQLite cache must still hit correctly and revalidate with conditionals after
+    the request metadata was projected on write"""
+    def make_session():
+        session = CachedSession(
+            cache_name=tempfile_path,
+            backend='sqlite',
+            cache_control=True,
+            allowable_methods=ALL_METHODS,
+            serializable_request_fields=['method', 'url'],
+        )
+        return mount_mock_adapter(session)
+
+    session = make_session()
+    session.get(
+        MOCKED_URL,
+        headers={'Authorization': 'Bearer secret', 'X-Trace': 'abc'},
+    )
+    # Stale item carrying a validator; projection must keep enough metadata to revalidate
+    session.get(MOCKED_URL_ETAG, headers={'Authorization': 'Bearer secret'}, expire_after=0)
+    session.get(MOCKED_URL_VARY, headers={'Accept': 'application/json'})
+    session.close()
+
+    # Reopen the same database with a fresh session (and a fresh mock adapter)
+    reopened = make_session()
+    adapter = reopened.mock_adapter
+    adapter.register_uri('GET', MOCKED_URL_ETAG, status_code=304, headers={'ETag': ETAG})
+
+    # Ordinary request still hits on the correct cache key
+    assert reopened.get(MOCKED_URL).from_cache is True
+
+    # Stale validated item triggers a conditional request and is served from the 304 response
+    revalidated = reopened.get(MOCKED_URL_ETAG)
+    assert revalidated.from_cache is True
+    assert adapter.last_request.headers.get('If-None-Match') == ETAG
+
+    # Vary-based selection still works after reopening
+    assert reopened.get(MOCKED_URL_VARY, headers={'Accept': 'application/json'}).from_cache is True
+    assert reopened.get(MOCKED_URL_VARY, headers={'Accept': 'text/html'}).from_cache is False
+    reopened.close()
 
 
 # Error handling

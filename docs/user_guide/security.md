@@ -44,6 +44,29 @@ To append to the default list instead of replacing it:
 However, there are cases where you would _not_ want to exclude this information from the cache;
 see section below.
 
+### Limiting serialized request metadata
+The `serializable_request_fields` option selects which parts of a cached request are persisted to
+the cache database. This is useful when a cache file is handed off for diagnostics and should only
+contain the minimum request info needed to replay a cached response. The selectable fields are:
+
+* `method`: HTTP method
+* `url`: Request URL
+* `headers`: Request headers
+* `cookies`: Request cookies
+* `body`: Request body
+
+```python
+>>> session = CachedSession(serializable_request_fields=['method', 'url'])
+```
+
+With the setting above, cached requests keep only the method and URL; headers, cookies, and body are
+dropped before serialization. Cache keys are still computed from the complete live request, so
+request matching is unaffected. Headers and cookies required to evaluate a `Vary` response header or
+the session-level `match_headers` option are always retained, so the correct cached response is
+still selected after the cache is reopened. When the option is not set (the default), all request
+metadata is stored, preserving previous behavior.
+
+
 ### Auth-gated content
 :::{warning}
 Authenticated requests for multiple users must be handled carefully to avoid exposing authenticated

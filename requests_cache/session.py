@@ -55,6 +55,7 @@ class CacheMixin(MIXIN_BASE):
         always_revalidate: bool = False,
         ignored_parameters: Iterable[str] = DEFAULT_IGNORED_PARAMS,
         match_headers: Union[Iterable[str], bool] = False,
+        serializable_request_fields: Optional[Iterable[str]] = None,
         filter_fn: Optional[FilterCallback] = None,
         key_fn: Optional[KeyCallback] = None,
         read_only: bool = False,
@@ -73,6 +74,7 @@ class CacheMixin(MIXIN_BASE):
             always_revalidate=always_revalidate,
             ignored_parameters=ignored_parameters,
             match_headers=match_headers,
+            serializable_request_fields=serializable_request_fields,
             filter_fn=filter_fn,
             key_fn=key_fn,
             read_only=read_only,
@@ -406,6 +408,10 @@ class CachedSession(CacheMixin, OriginalSession):
             be a list of headers, or ``True`` to match all.
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude from both
             request matching and cached request data
+        serializable_request_fields: Select which request metadata fields
+            (``method``, ``url``, ``headers``, ``cookies``, ``body``) are persisted with cached
+            responses. If not set, all request data is stored. Headers and cookies needed for
+            ``Vary`` and ``match_headers`` validation are always retained.
         read_only: Read existing cached responses, but do not write any new responses to the cache
         stale_if_error: Return a stale response if a new request raises an exception. Optionally
             accepts a time value representing maximum staleness to accept.
