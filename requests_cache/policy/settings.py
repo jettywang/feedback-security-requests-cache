@@ -45,6 +45,7 @@ class CacheSettings(RichMixin):
     key_fn: KeyCallback = field(default=None)
     match_headers: Union[Iterable[str], bool] = field(default=False)
     only_if_cached: bool = field(default=False)
+    partition: Optional[str] = field(default=None)
     read_only: bool = field(default=False)
     stale_if_error: Union[bool, ExpirationTime] = field(default=False)
     stale_while_revalidate: Union[bool, ExpirationTime] = field(default=False)

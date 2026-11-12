@@ -1,6 +1,8 @@
 # History
 
 ## Unreleased
+* Add a `partition` option to isolate a session's cached responses within a shared cache; only a
+  hash of the partition value is stored in cache keys
 * Fix `ValueError` when a response has an invalid `Expires` date (for example `Expires: garbage`); it is now treated as already expired
 * Fix JSON refresh comparisons for mixed-case `Content-Type` values
 * Keep caller-supplied MongoDB clients open when closing MongoDB or GridFS caches

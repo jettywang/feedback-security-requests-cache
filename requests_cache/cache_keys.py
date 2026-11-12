@@ -58,6 +58,7 @@ def create_key(
     match_headers: Union[ParamList, bool] = False,
     serializer: Any = None,
     content_root_key: Optional[str] = None,
+    partition: Optional[str] = None,
     **request_kwargs,
 ) -> str:
     """Create a normalized cache key based on a request object
@@ -68,6 +69,8 @@ def create_key(
         match_headers: Match only the specified headers, or ``True`` to match all headers
         serializer: Serializer name or instance
         content_root_key: root element in the request body to apply ignored_parameters to
+        partition: Cache partition to namespace the key under; only its hash is used, so the
+            plaintext value never appears in the cache
         request_kwargs: Additional keyword arguments for :py:func:`~requests.request`
     """
     # Normalize and gather all relevant request info to match against
@@ -79,6 +82,7 @@ def create_key(
         bool(request_kwargs.get('verify', True)),
         *get_matched_headers(request.headers, match_headers),
         str(serializer),
+        hash_partition(partition),
     ]
 
     # Generate a hash based on this info
@@ -92,6 +96,20 @@ def create_key(
     for part in key_parts:
         key.update(encode(part))
     return key.hexdigest()
+
+
+def hash_partition(partition: Optional[str]) -> str:
+    """Hash a cache partition name so it can be mixed into a cache key without storing its
+    plaintext value. Returns an empty string if no partition is set, which leaves the generated
+    cache key unchanged.
+    """
+    if not partition:
+        return ''
+    try:
+        return blake2b(encode(partition), digest_size=8).hexdigest()
+    except (TypeError, ValueError):
+        # See create_key() for details on this fallback
+        return sha256(encode(partition)).hexdigest()
 
 
 def get_matched_headers(

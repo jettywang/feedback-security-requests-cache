@@ -57,6 +57,7 @@ class CacheMixin(MIXIN_BASE):
         match_headers: Union[Iterable[str], bool] = False,
         filter_fn: Optional[FilterCallback] = None,
         key_fn: Optional[KeyCallback] = None,
+        partition: Optional[str] = None,
         read_only: bool = False,
         stale_if_error: Union[bool, int] = False,
         autoclose: bool = True,
@@ -75,6 +76,7 @@ class CacheMixin(MIXIN_BASE):
             match_headers=match_headers,
             filter_fn=filter_fn,
             key_fn=key_fn,
+            partition=partition,
             read_only=read_only,
             stale_if_error=stale_if_error,
             autoclose=autoclose,
@@ -404,6 +406,9 @@ class CachedSession(CacheMixin, OriginalSession):
             is not expired
         match_headers: Request headers to match, when `Vary` response header is not available. May
             be a list of headers, or ``True`` to match all.
+        partition: Cache partition to isolate this session's cached responses from other clients
+            sharing the same cache. Only a hash of this value is used in cache keys, so its
+            plaintext value is never stored in the cache.
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude from both
             request matching and cached request data
         read_only: Read existing cached responses, but do not write any new responses to the cache

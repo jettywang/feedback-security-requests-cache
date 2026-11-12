@@ -823,6 +823,112 @@ def test_key_fn(mock_session):
     assert response.from_cache is True
 
 
+def test_partition__default_shared(tempfile_path):
+    """By default, sessions sharing a cache db also share cached responses"""
+    session_1 = mount_mock_adapter(CachedSession(tempfile_path, backend='sqlite'))
+    session_2 = mount_mock_adapter(CachedSession(tempfile_path, backend='sqlite'))
+
+    assert session_1.get(MOCKED_URL).from_cache is False
+    assert session_2.get(MOCKED_URL).from_cache is True
+    session_1.close()
+    session_2.close()
+
+
+def test_partition__isolated(tempfile_path):
+    """Sessions with different partitions sharing a cache db each cache their own copy"""
+    session_1 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-1')
+    )
+    session_2 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-2')
+    )
+
+    assert session_1.get(MOCKED_URL).from_cache is False
+    assert session_2.get(MOCKED_URL).from_cache is False
+    assert session_1.get(MOCKED_URL).from_cache is True
+    assert session_2.get(MOCKED_URL).from_cache is True
+    assert len(session_1.cache.responses) == 2
+    session_1.close()
+    session_2.close()
+
+
+def test_partition__delete_by_request(tempfile_path):
+    """Deleting a request from one partition must not affect other partitions"""
+    session_1 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-1')
+    )
+    session_2 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-2')
+    )
+    session_1.get(MOCKED_URL)
+    session_2.get(MOCKED_URL)
+
+    session_1.cache.delete(urls=[MOCKED_URL])
+    assert session_1.cache.contains(url=MOCKED_URL) is False
+    assert session_2.cache.contains(url=MOCKED_URL) is True
+    assert session_2.get(MOCKED_URL).from_cache is True
+
+    # A partition can also be explicitly cleared by name
+    session_1.cache.delete(urls=[MOCKED_URL], partition='team-2')
+    assert session_2.cache.contains(url=MOCKED_URL) is False
+    assert session_2.get(MOCKED_URL).from_cache is False
+    session_1.close()
+    session_2.close()
+
+
+def test_partition__revalidation(tempfile_path):
+    """Conditional revalidation only updates the cached response in the session's own partition"""
+    session_1 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-1')
+    )
+    session_2 = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-2')
+    )
+    past = utcnow() - timedelta(days=1)
+    session_1.settings.expire_after = past
+    session_2.settings.expire_after = past
+    session_1.get(MOCKED_URL_ETAG)
+    session_2.get(MOCKED_URL_ETAG)
+
+    # Revalidate team-1's stale cached response with a 304
+    session_1.settings.expire_after = timedelta(minutes=5)
+    session_1.mock_adapter.register_uri('GET', MOCKED_URL_ETAG, status_code=304)
+    response = session_1.get(MOCKED_URL_ETAG)
+    assert response.from_cache is True
+
+    # Team-1's cached copy was refreshed, while team-2's copy is still expired
+    key_1 = session_1.cache.create_key(Request('GET', MOCKED_URL_ETAG))
+    key_2 = session_2.cache.create_key(Request('GET', MOCKED_URL_ETAG))
+    assert key_1 != key_2
+    assert session_1.cache.responses[key_1].is_expired is False
+    assert session_2.cache.responses[key_2].is_expired is True
+    session_1.close()
+    session_2.close()
+
+
+def test_partition__no_plaintext(tempfile_path):
+    """The partition name must not appear in plaintext in cache keys or cached objects"""
+    session = mount_mock_adapter(
+        CachedSession(tempfile_path, backend='sqlite', partition='team-secret')
+    )
+    session.get(MOCKED_URL)
+
+    cache_key = session.cache.create_key(Request('GET', MOCKED_URL))
+    assert 'team-secret' not in cache_key
+    cached_response = session.cache.get_response(cache_key)
+    assert cached_response is not None
+    serialized = session.cache.responses.serializer.dumps(cached_response)
+    assert b'team-secret' not in serialized
+
+    with session.cache.responses.connection() as con:
+        rows = con.execute('SELECT key, value FROM responses').fetchall()
+    assert rows
+    for key, value in rows:
+        assert 'team-secret' not in key
+        assert b'team-secret' not in (value or b'')
+    session.close()
+
+
 def test_hooks(mock_session):
     state = defaultdict(int)
     mock_session.get(MOCKED_URL)

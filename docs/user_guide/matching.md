@@ -84,6 +84,33 @@ isn't available:
 If you want to match _all_ request headers, you can use `match_headers=True`.
 
 
+(cache-partitions)=
+## Cache Partitions
+If multiple clients share the same cache (for example, a single SQLite file) but must not see each
+other's cached responses, you can give each client its own **cache partition**:
+```python
+>>> session = CachedSession('shared_cache', partition='team-a')
+```
+
+All cache operations for that session — cache hits, conditional revalidation, and deleting individual
+requests with {py:meth}`.BaseCache.delete` — are then scoped to that partition. Two sessions with
+different partitions requesting the same URL will each cache and use their own copy, and deleting a
+request from one partition won't affect the other:
+```python
+>>> session_a = CachedSession('shared_cache', partition='team-a')
+>>> session_b = CachedSession('shared_cache', partition='team-b')
+>>> session_a.get('https://example.com')   # cache miss
+>>> session_b.get('https://example.com')   # cache miss; team-b has its own copy
+>>> session_a.cache.delete(urls=['https://example.com'])  # only clears team-a's copy
+```
+
+The partition value is only ever stored as a hash within the cache key, so its plaintext value does
+not appear in cache keys or cached responses. If no partition is set (the default), behavior is
+unchanged and all clients share the same cache entries.
+
+{py:meth}`.BaseCache.delete` and {py:meth}`.BaseCache.contains` also accept a `partition` argument
+to operate on a specific partition other than the session's own.
+
 (custom-matching)=
 ## Custom Request Matching
 If you need more advanced behavior, you can implement your own custom request matching.

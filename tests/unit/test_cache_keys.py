@@ -13,6 +13,7 @@ from unittest.mock import patch
 from requests_cache.cache_keys import (
     MAX_NORM_BODY_SIZE,
     create_key,
+    hash_partition,
     normalize_headers,
     normalize_request,
     redact_response,
@@ -260,3 +261,26 @@ def test_remove_ignored_headers__empty():
         headers={'foo': 'bar'},
     )
     assert normalize_request(request.prepare(), ignored_parameters=None).headers == request.headers
+
+
+def test_create_key__partition():
+    """Cache keys should be stable for the same partition, and differ across partitions"""
+    request = Request(method='GET', url='https://example.com')
+    assert create_key(request, partition='team-a') == create_key(request, partition='team-a')
+    assert create_key(request, partition='team-a') != create_key(request, partition='team-b')
+
+
+def test_create_key__partition__default_unchanged():
+    """Without a partition, cache keys should be identical to previous versions"""
+    request = Request(method='GET', url='https://example.com?foo=bar&param=1')
+    assert create_key(request) == CACHE_KEY
+    assert create_key(request, partition=None) == CACHE_KEY
+    assert create_key(request, partition='') == CACHE_KEY
+
+
+def test_hash_partition():
+    assert hash_partition(None) == ''
+    assert hash_partition('') == ''
+    assert hash_partition('team-a') == hash_partition('team-a')
+    assert hash_partition('team-a') != hash_partition('team-b')
+    assert 'team-a' not in hash_partition('team-a')

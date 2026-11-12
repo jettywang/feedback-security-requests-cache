@@ -123,11 +123,19 @@ class BaseCache:
         self,
         request: AnyRequest,
         match_headers: Optional[Iterable[str]] = None,
+        partition: Optional[str] = None,
         **kwargs,
     ) -> str:
-        """Create a normalized cache key from a request object"""
+        """Create a normalized cache key from a request object
+
+        Args:
+            request: Request object to generate a cache key from
+            match_headers: Match only the specified headers
+            partition: Cache partition to namespace the key under; defaults to the session-level
+                partition, if any. Only its hash is used in the cache key.
+        """
         key_fn = self._settings.key_fn if self._settings.key_fn is not None else create_key
-        return key_fn(
+        key_kwargs = dict(
             request=request,
             ignored_parameters=self._settings.ignored_parameters,
             content_root_key=self._settings.content_root_key,
@@ -135,6 +143,12 @@ class BaseCache:
             serializer=self.responses.serializer,
             **kwargs,
         )
+        # Only pass partition to the key function if one is set, for compatibility with custom
+        # key functions that don't accept it
+        partition = partition if partition is not None else self._settings.partition
+        if partition:
+            key_kwargs['partition'] = partition
+        return key_fn(**key_kwargs)
 
     # Convenience methods
     # --------------------
@@ -145,6 +159,7 @@ class BaseCache:
         request: Optional[AnyRequest] = None,
         url: Optional[str] = None,
         verify: bool = True,
+        partition: Optional[str] = None,
     ):
         """Check if the specified request is cached
 
@@ -153,11 +168,12 @@ class BaseCache:
             request: Check for a matching request, according to current request matching settings
             url: Check for a matching GET request with the specified URL
             verify: Check for requests with or without SSL verification
+            partition: Check in this cache partition; defaults to the session-level partition
         """
         if url:
             request = Request('GET', url)
         if request and not key:
-            key = self.create_key(request, verify=verify)
+            key = self.create_key(request, verify=verify, partition=partition)
         return key in self.responses or key in self.redirects
 
     def delete(
@@ -169,6 +185,7 @@ class BaseCache:
         requests: Optional[Iterable[AnyRequest]] = None,
         urls: Optional[Iterable[str]] = None,
         verify: bool = True,
+        partition: Optional[str] = None,
     ):
         """Remove responses from the cache according one or more conditions.
 
@@ -180,12 +197,16 @@ class BaseCache:
             requests: Remove matching responses, according to current request matching settings
             urls: Remove matching GET requests for the specified URL(s)
             verify: Set to ``False`` to remove responses without SSL verification
+            partition: Remove matching ``requests``/``urls`` from this cache partition; defaults
+                to the session-level partition. Does not apply to ``keys``, which are exact matches.
         """
         delete_keys: List[str] = list(keys) if keys else []
         if urls:
             requests = list(requests or []) + [Request('GET', url).prepare() for url in urls]
         if requests:
-            delete_keys += [self.create_key(request, verify=verify) for request in requests]
+            delete_keys += [
+                self.create_key(request, verify=verify, partition=partition) for request in requests
+            ]
 
         for response in self.filter(
             valid=False, expired=expired, invalid=invalid, older_than=older_than
