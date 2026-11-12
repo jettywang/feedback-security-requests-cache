@@ -1,6 +1,8 @@
 # History
 
 ## Unreleased
+* Add `old_secret_keys` argument to `signer_stage()` and `safe_pickle_serializer()` to support secret key rotation: new records are signed with the current key, and records signed with previous keys remain readable
+* Treat a failed signature check (`itsdangerous.BadSignature`) as a cache miss instead of raising an error
 * Fix `ValueError` when a response has an invalid `Expires` date (for example `Expires: garbage`); it is now treated as already expired
 * Fix JSON refresh comparisons for mixed-case `Content-Type` values
 * Keep caller-supplied MongoDB clients open when closing MongoDB or GridFS caches

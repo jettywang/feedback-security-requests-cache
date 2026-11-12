@@ -79,7 +79,6 @@ def test_optional_dependencies():
 @skip_missing_deps('itsdangerous')
 def test_cache_signing(tempfile_path):
     from itsdangerous import Signer
-    from itsdangerous.exc import BadSignature
 
     serializer = safe_pickle_serializer(secret_key=str(uuid4()))
     session = CachedSession(tempfile_path, serializer=serializer)
@@ -90,11 +89,65 @@ def test_cache_signing(tempfile_path):
     session.cache.responses['key'] = response
     assert session.cache.responses['key'] == response
 
-    # Without the same signing key, the item shouldn't be considered safe to deserialize
+    # Without the same signing key, the item shouldn't be considered safe to deserialize,
+    # and is treated as a cache miss
     serializer = safe_pickle_serializer(secret_key='a different key')
     session = CachedSession(tempfile_path, serializer=serializer)
+    assert session.cache.responses['key'] is None
+    assert session.cache.get_response('key') is None
+
+
+@skip_missing_deps('itsdangerous')
+def test_cache_signing_verifies_before_decoding():
+    """The signature is validated before the payload is passed to the decoder"""
+    from itsdangerous.exc import BadSignature
+
+    serializer = safe_pickle_serializer(secret_key=str(uuid4()))
+    # Not a valid signature or pickle payload; the signature check must fail first
     with pytest.raises(BadSignature):
-        session.cache.responses['key']
+        serializer.loads(b'garbage payload')
+
+
+@skip_missing_deps('itsdangerous')
+def test_cache_signing_key_rotation(tempfile_path):
+    """During key rotation, records signed with an old key should still be readable, and new
+    records should be signed with the current key"""
+    old_key = str(uuid4())
+    new_key = str(uuid4())
+
+    # Write a record with the old key
+    old_serializer = safe_pickle_serializer(secret_key=old_key)
+    session = CachedSession(tempfile_path, serializer=old_serializer)
+    old_record = CachedResponse()
+    session.cache.responses['old_key_record'] = old_record
+    session.close()
+
+    # After rotation, records signed with the old key are still readable
+    rotated_serializer = safe_pickle_serializer(secret_key=new_key, old_secret_keys=[old_key])
+    session = CachedSession(tempfile_path, serializer=rotated_serializer)
+    assert session.cache.responses['old_key_record'] == old_record
+
+    # New records are signed with the current key, not an old one
+    new_record = CachedResponse()
+    session.cache.responses['new_key_record'] = new_record
+    session.close()
+    session = CachedSession(tempfile_path, serializer=safe_pickle_serializer(secret_key=new_key))
+    assert session.cache.responses['new_key_record'] == new_record
+    session = CachedSession(tempfile_path, serializer=safe_pickle_serializer(secret_key=old_key))
+    assert session.cache.responses['new_key_record'] is None
+
+    # A failed signature check is equivalent to a cache miss
+    session = CachedSession(
+        tempfile_path,
+        serializer=safe_pickle_serializer(secret_key=new_key, old_secret_keys=[old_key]),
+    )
+    session.cache.responses['new_key_record'] = new_record
+    session.close()
+    session = CachedSession(
+        tempfile_path, serializer=safe_pickle_serializer(secret_key='an unknown key')
+    )
+    assert session.cache.responses['new_key_record'] is None
+    assert session.cache.get_response('new_key_record') is None
 
 
 def test_custom_serializer(tempfile_path):

@@ -27,6 +27,15 @@ from ..serializers import SerializerType, init_serializer
 # Specific exceptions that may be raised during deserialization
 DESERIALIZE_ERRORS = (AttributeError, EOFError, ImportError, PickleError, TypeError, ValueError)
 
+# A failed signature check (itsdangerous is an optional dependency) is also treated as a
+# deserialization failure, i.e. a cache miss
+try:
+    from itsdangerous.exc import BadSignature
+
+    DESERIALIZE_ERRORS = DESERIALIZE_ERRORS + (BadSignature,)
+except ImportError:
+    pass
+
 logger = getLogger(__name__)
 
 

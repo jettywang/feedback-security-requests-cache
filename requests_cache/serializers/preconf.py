@@ -62,26 +62,45 @@ pickle_serializer = SerializerPipeline(
 
 
 # Safe pickle serializer
-def signer_stage(secret_key=None, salt='requests-cache') -> Stage:
+def signer_stage(secret_key=None, salt='requests-cache', old_secret_keys=None) -> Stage:
     """Create a stage that uses ``itsdangerous`` to add a signature to responses on write, and
     validate that signature with a secret key on read. Can be used in a
     :py:class:`.SerializerPipeline` in combination with any other serialization steps.
+
+    Args:
+        secret_key: Current secret key; used to sign new records, and to validate records
+        salt: Salt used for key derivation
+        old_secret_keys: Previously used secret keys that should still be accepted for
+            validation, to allow reading records written before a key rotation. Never used
+            to sign new records.
     """
     from itsdangerous import Signer
 
+    # itsdangerous accepts a list of keys (oldest to newest); the last is used for signing,
+    # and all are tried for validation
+    secret_keys = [*(old_secret_keys or []), secret_key]
     return Stage(
-        Signer(secret_key=secret_key, salt=salt),
+        Signer(secret_key=secret_keys, salt=salt),
         dumps='sign',
         loads='unsign',
     )
 
 
-def safe_pickle_serializer(secret_key=None, salt='requests-cache', **kwargs) -> SerializerPipeline:
+def safe_pickle_serializer(
+    secret_key=None, salt='requests-cache', old_secret_keys=None, **kwargs
+) -> SerializerPipeline:
     """Create a serializer that uses ``pickle`` + ``itsdangerous`` to add a signature to
     responses on write, and validate that signature with a secret key on read.
+
+    Args:
+        secret_key: Current secret key; used to sign new records, and to validate records
+        salt: Salt used for key derivation
+        old_secret_keys: Previously used secret keys that should still be accepted for
+            validation, to allow reading records written before a key rotation. Never used
+            to sign new records.
     """
     return SerializerPipeline(
-        [base_stage, Stage(pickle), signer_stage(secret_key, salt)],
+        [base_stage, Stage(pickle), signer_stage(secret_key, salt, old_secret_keys)],
         name='safe_pickle',
         is_binary=True,
     )

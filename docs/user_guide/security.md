@@ -143,8 +143,30 @@ You can verify that it's working by modifying the cached item (*without* your ke
 >>> session_2.cache.responses[cache_key] = 'exploit!'
 ```
 
-Then, if you try to get that cached response again (*with* your key), you will get an error:
+Then, if you try to get that cached response again (*with* your key), the signature check
+will fail and the item will be treated as a cache miss (and a new response will be fetched):
 ```python
 >>> session.get('https://httpbin.org/get')
-BadSignature: Signature b'iFNmzdUOSw5vqrR9Cb_wfI1EoZ8' does not match
+# Unable to deserialize response: Signature b'iFNmzdUOSw5vqrR9Cb_wfI1EoZ8' does not match
 ```
+
+### Key Rotation
+If you need to rotate your secret key (for example, when migrating a shared cache to a new
+service), provide the current key along with any previously used keys that should still be
+accepted for reading:
+```python
+>>> serializer = safe_pickle_serializer(
+...     secret_key=new_key,
+...     old_secret_keys=[old_key],
+... )
+```
+
+New records are always signed with the current `secret_key`, while records signed with any
+key in `old_secret_keys` can still be read. The signature is validated before the cached
+data is deserialized, so unverified data is never decoded. Once all old records have
+expired or been rewritten, the old keys can be removed from `old_secret_keys`.
+
+:::{note}
+Secret keys are only used to sign and validate cached data; they are never written to the
+cache or to logs.
+:::
