@@ -25,6 +25,7 @@ modules/requests_cache.session
 modules/requests_cache.patcher
 modules/requests_cache.backends
 modules/requests_cache.models
+modules/requests_cache.explanation
 ```
 
 ## Secondary Modules
