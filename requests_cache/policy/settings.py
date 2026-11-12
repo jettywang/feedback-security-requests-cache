@@ -39,6 +39,7 @@ class CacheSettings(RichMixin):
     cache_control: bool = field(default=False)
     content_root_key: Optional[str] = field(default=None)
     disabled: bool = field(default=False)
+    exclude_cookies: Iterable[str] = field(factory=list)
     expire_after: ExpirationTime = field(default=None)
     filter_fn: FilterCallback = field(default=None)
     ignored_parameters: Iterable[str] = field(default=DEFAULT_IGNORED_PARAMS)

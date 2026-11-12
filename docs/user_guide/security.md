@@ -44,6 +44,19 @@ To append to the default list instead of replacing it:
 However, there are cases where you would _not_ want to exclude this information from the cache;
 see section below.
 
+### Removing Cookies
+Some endpoints return a cacheable response body along with `Set-Cookie` headers, for example to
+refresh a session token. If you want to cache the response but not the cookies, use the
+`exclude_cookies` option to remove specific cookie names from cached responses:
+```python
+>>> session = CachedSession(exclude_cookies=['session'])
+```
+
+Cookies with these names are still handled by `requests` as usual for the original (non-cached)
+response, including session cookie jar updates; they just won't be saved to the cache. This
+applies to the response cookie jar and `Set-Cookie` headers, including any redirects in the
+response history.
+
 ### Auth-gated content
 :::{warning}
 Authenticated requests for multiple users must be handled carefully to avoid exposing authenticated

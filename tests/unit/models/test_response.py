@@ -5,11 +5,13 @@ from time import sleep
 
 import pytest
 from requests import Response
+from requests.cookies import cookiejar_from_dict
+from requests.structures import CaseInsensitiveDict
 from urllib3.response import HTTPResponse
 
 from requests_cache.models.response import CachedResponse, OriginalResponse, format_file_size
 from requests_cache.policy import CacheActions, utcnow
-from tests.conftest import MOCKED_URL
+from tests.conftest import MOCKED_URL, MOCKED_URL_JSON
 
 
 def test_basic_attrs(mock_session):
@@ -198,3 +200,94 @@ def test_repr(mock_session):
 )
 def test_format_file_size(n_bytes, expected_size):
     assert format_file_size(n_bytes) == expected_size
+
+
+def test_remove_cookies():
+    """Excluded cookies are removed from the cookie jar and Set-Cookie headers; commas within
+    cookie attributes (e.g., Expires dates) are not treated as delimiters"""
+    response = CachedResponse(
+        headers=CaseInsensitiveDict(
+            {
+                'Set-Cookie': (
+                    'session=abc; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/, '
+                    'prefs=dark; Path=/'
+                ),
+            }
+        ),
+        cookies=cookiejar_from_dict({'session': 'abc', 'prefs': 'dark'}),
+    )
+    response.remove_cookies(['session'])
+
+    assert dict(response.cookies) == {'prefs': 'dark'}
+    assert response.headers['Set-Cookie'] == 'prefs=dark; Path=/'
+    assert response.raw.headers.get('Set-Cookie') == 'prefs=dark; Path=/'
+
+
+def test_remove_cookies__all_removed():
+    response = CachedResponse(
+        headers=CaseInsensitiveDict({'Set-Cookie': 'session=abc; Path=/'}),
+        cookies=cookiejar_from_dict({'session': 'abc'}),
+    )
+    response.remove_cookies(['session'])
+
+    assert dict(response.cookies) == {}
+    assert 'Set-Cookie' not in response.headers
+    assert response.raw.headers.get('Set-Cookie') is None
+
+
+def test_remove_cookies__no_match():
+    response = CachedResponse(
+        headers=CaseInsensitiveDict({'Set-Cookie': 'prefs=dark; Path=/'}),
+        cookies=cookiejar_from_dict({'prefs': 'dark'}),
+    )
+    response.remove_cookies(['session'])
+
+    assert dict(response.cookies) == {'prefs': 'dark'}
+    assert response.headers['Set-Cookie'] == 'prefs=dark; Path=/'
+
+
+def test_remove_cookies__empty():
+    response = CachedResponse(cookies=cookiejar_from_dict({'prefs': 'dark'}))
+    jar = response.cookies
+    response.remove_cookies([])
+
+    assert response.cookies is jar
+    assert dict(response.cookies) == {'prefs': 'dark'}
+
+
+def test_remove_cookies__history():
+    """Excluded cookies are also removed from cached redirect history"""
+    redirect = CachedResponse(
+        status_code=302,
+        headers=CaseInsensitiveDict({'Set-Cookie': 'session=abc; Path=/'}),
+        cookies=cookiejar_from_dict({'session': 'abc'}),
+    )
+    response = CachedResponse(
+        headers=CaseInsensitiveDict({'Set-Cookie': 'prefs=dark; Path=/'}),
+        cookies=cookiejar_from_dict({'prefs': 'dark'}),
+        history=[redirect],
+    )
+    response.remove_cookies(['session'])
+
+    assert dict(response.cookies) == {'prefs': 'dark'}
+    assert dict(redirect.cookies) == {}
+    assert 'Set-Cookie' not in redirect.headers
+
+
+def test_remove_cookies__original_response_unmodified(mock_session):
+    """Removing cookies from a cached response must not affect the original response object"""
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL_JSON,
+        headers={'Content-Type': 'application/json', 'Set-Cookie': 'session=abc; Path=/'},
+        json={'stable': True},
+        status_code=200,
+    )
+    original = mock_session.get(MOCKED_URL_JSON)
+    cached_response = CachedResponse.from_response(original)
+    cached_response.remove_cookies(['session'])
+
+    assert dict(cached_response.cookies) == {}
+    assert 'Set-Cookie' not in cached_response.headers
+    assert dict(original.cookies) == {'session': 'abc'}
+    assert original.headers['Set-Cookie'] == 'session=abc; Path=/'

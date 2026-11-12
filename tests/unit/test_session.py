@@ -5,6 +5,8 @@ import pickle
 import sys
 from collections import UserDict, defaultdict
 from datetime import datetime, timedelta
+from email.message import Message
+from io import BytesIO
 from logging import getLogger
 from pathlib import Path
 from pickle import PickleError
@@ -15,7 +17,9 @@ from urllib.parse import urlencode
 import pytest
 import requests
 from requests import HTTPError, Request, RequestException, Session
+from requests.adapters import HTTPAdapter
 from requests.structures import CaseInsensitiveDict
+from urllib3.response import HTTPHeaderDict, HTTPResponse
 
 from requests_cache import ALL_METHODS, CachedSession
 from requests_cache._utils import get_placeholder_class
@@ -197,6 +201,127 @@ def test_all_methods__ignored_parameters__redacted(field, method, mock_session):
     elif field == 'json':
         body = json.loads(body)
         assert body['ignored'] == 'REDACTED'
+
+
+# Cookie exclusion
+# -----------------------------------------------------
+
+
+class _OriginalResponse:
+    """Minimal stand-in for ``httplib.HTTPResponse``, needed for requests to extract cookies
+    from a mocked raw response"""
+
+    def __init__(self, msg):
+        self.msg = msg
+
+    def isclosed(self):
+        return True
+
+
+class SetCookieAdapter(HTTPAdapter):
+    """Test adapter that returns a static JSON response with both a session cookie and a
+    persistent cookie, using a real urllib3 response so requests performs its usual cookie
+    handling (unlike requests-mock, which skips session cookie jar updates).
+    """
+
+    def send(self, request, **kwargs):
+        set_cookies = [
+            'session=abc123; Path=/; HttpOnly',
+            'prefs=dark; Path=/',
+        ]
+        message = Message()
+        for value in set_cookies:
+            message.add_header('Set-Cookie', value)
+        raw = HTTPResponse(
+            body=BytesIO(b'{"stable": true}'),
+            status=200,
+            headers=HTTPHeaderDict(
+                [('Content-Type', 'application/json')]
+                + [('Set-Cookie', value) for value in set_cookies]
+            ),
+            preload_content=False,
+            original_response=_OriginalResponse(message),
+        )
+        return self.build_response(request, raw)
+
+
+def test_exclude_cookies(tempfile_path):
+    """With exclude_cookies, the first (online) response and the session cookie jar are handled
+    by requests as usual, but the excluded cookies are not saved to the cache.
+    """
+    url = 'http+mock://requests-cache.com/poll'
+    session = CachedSession(cache_name=tempfile_path, backend='sqlite', exclude_cookies=['session'])
+    session.mount('http+mock://', SetCookieAdapter())
+
+    # First response is sent online and handled by requests as usual
+    response_1 = session.get(url)
+    assert response_1.from_cache is False
+    assert response_1.json() == {'stable': True}
+    assert dict(response_1.cookies) == {'session': 'abc123', 'prefs': 'dark'}
+    assert 'session=abc123' in response_1.headers['Set-Cookie']
+    assert 'prefs=dark' in response_1.headers['Set-Cookie']
+
+    # The session cookie jar is updated as usual
+    assert dict(session.cookies) == {'session': 'abc123', 'prefs': 'dark'}
+
+    # The copy saved to disk contains the response body and remaining cookie, but not the
+    # excluded one. Use a separate session to force deserialization from disk.
+    session_2 = CachedSession(cache_name=tempfile_path, backend='sqlite')
+    cached_response = session_2.cache.responses[response_1.cache_key]
+    assert cached_response.json() == {'stable': True}
+    assert dict(cached_response.cookies) == {'prefs': 'dark'}
+    assert cached_response.headers['Set-Cookie'] == 'prefs=dark; Path=/'
+    assert cached_response.raw.headers.get('Set-Cookie') == 'prefs=dark; Path=/'
+
+    # The second request is served from the cache, also without the excluded cookie
+    response_2 = session.get(url)
+    assert response_2.from_cache is True
+    assert response_2.json() == {'stable': True}
+    assert dict(response_2.cookies) == {'prefs': 'dark'}
+    assert response_2.headers['Set-Cookie'] == 'prefs=dark; Path=/'
+
+    # A cache hit does not modify the session cookie jar
+    assert dict(session.cookies) == {'session': 'abc123', 'prefs': 'dark'}
+
+
+def test_exclude_cookies__all_removed(tempfile_path):
+    """If all cookies are excluded, no Set-Cookie data is saved to the cache at all"""
+    url = 'http+mock://requests-cache.com/poll'
+    session = CachedSession(
+        cache_name=tempfile_path,
+        backend='sqlite',
+        exclude_cookies=['session', 'prefs'],
+    )
+    session.mount('http+mock://', SetCookieAdapter())
+
+    response_1 = session.get(url)
+    assert dict(response_1.cookies) == {'session': 'abc123', 'prefs': 'dark'}
+    assert dict(session.cookies) == {'session': 'abc123', 'prefs': 'dark'}
+
+    cached_response = session.cache.responses[response_1.cache_key]
+    assert cached_response.json() == {'stable': True}
+    assert dict(cached_response.cookies) == {}
+    assert 'Set-Cookie' not in cached_response.headers
+    assert cached_response.raw.headers.get('Set-Cookie') is None
+
+    response_2 = session.get(url)
+    assert response_2.from_cache is True
+    assert dict(response_2.cookies) == {}
+
+
+def test_exclude_cookies__disabled(mock_session):
+    """By default, cookies are saved to the cache"""
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL_JSON,
+        headers={'Content-Type': 'application/json', 'Set-Cookie': 'session=abc123; Path=/'},
+        json={'stable': True},
+        status_code=200,
+    )
+    response = mock_session.get(MOCKED_URL_JSON)
+    cached_response = mock_session.cache.responses[response.cache_key]
+    assert dict(cached_response.cookies) == {'session': 'abc123'}
+    assert 'session=abc123' in cached_response.headers['Set-Cookie']
 
 
 # Variations of relevant request arguments

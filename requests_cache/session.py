@@ -54,6 +54,7 @@ class CacheMixin(MIXIN_BASE):
         allowable_methods: Iterable[str] = DEFAULT_METHODS,
         always_revalidate: bool = False,
         ignored_parameters: Iterable[str] = DEFAULT_IGNORED_PARAMS,
+        exclude_cookies: Iterable[str] = (),
         match_headers: Union[Iterable[str], bool] = False,
         filter_fn: Optional[FilterCallback] = None,
         key_fn: Optional[KeyCallback] = None,
@@ -72,6 +73,7 @@ class CacheMixin(MIXIN_BASE):
             allowable_methods=allowable_methods,
             always_revalidate=always_revalidate,
             ignored_parameters=ignored_parameters,
+            exclude_cookies=exclude_cookies,
             match_headers=match_headers,
             filter_fn=filter_fn,
             key_fn=key_fn,
@@ -406,6 +408,9 @@ class CachedSession(CacheMixin, OriginalSession):
             be a list of headers, or ``True`` to match all.
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude from both
             request matching and cached request data
+        exclude_cookies: Cookie names to remove from cached responses. ``Set-Cookie`` cookies with
+            these names are handled normally for the returned (non-cached) response, but are not
+            saved to the cache.
         read_only: Read existing cached responses, but do not write any new responses to the cache
         stale_if_error: Return a stale response if a new request raises an exception. Optionally
             accepts a time value representing maximum staleness to accept.

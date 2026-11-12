@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from json import JSONDecodeError, dumps
 from logging import getLogger
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from re import split
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Union
 
 import attr
 from attrs import define, field
@@ -97,6 +98,56 @@ def _comparable_content(response: Response) -> Union[DecodedContent, bytes]:
         except (JSONDecodeError, RequestException):
             pass
     return response.text if content_type.startswith('text/') else response.content
+
+
+def _split_set_cookies(header_value: str) -> List[str]:
+    """Split a ``Set-Cookie`` header containing multiple (comma-merged) cookies. Commas within
+    cookie attributes (e.g., in ``Expires`` dates) are not treated as delimiters.
+    """
+    return [c.strip() for c in split(r',\s*(?=[^;,=]+=)', header_value) if c.strip()]
+
+
+def _cookie_name(set_cookie_value: str) -> str:
+    """Get the cookie name from a single ``Set-Cookie`` value"""
+    return set_cookie_value.split('=', 1)[0].strip()
+
+
+def _filter_header_cookies(headers: CaseInsensitiveDict, names) -> CaseInsensitiveDict:
+    """Remove the given cookie names from a response's (possibly comma-merged) ``Set-Cookie``
+    header. Returns a copy if modified; otherwise returns the original object.
+    """
+    if 'Set-Cookie' not in headers:
+        return headers
+    headers = CaseInsensitiveDict(headers)
+    kept = [c for c in _split_set_cookies(headers['Set-Cookie']) if _cookie_name(c) not in names]
+    if kept:
+        headers['Set-Cookie'] = ', '.join(kept)
+    else:
+        del headers['Set-Cookie']
+    return headers
+
+
+def _filter_raw_header_cookies(raw_headers, names):
+    """Remove the given cookie names from raw (urllib3) response headers. Returns a copy if
+    modified; otherwise returns the original object.
+    """
+    items = []
+    for key, value in raw_headers.iteritems():
+        if key.lower() == 'set-cookie':
+            items.extend((key, v) for v in _split_set_cookies(value))
+        else:
+            items.append((key, value))
+    kept = [
+        (key, value)
+        for key, value in items
+        if key.lower() != 'set-cookie' or _cookie_name(value) not in names
+    ]
+    if len(kept) == len(items):
+        return raw_headers
+    new_headers = type(raw_headers)()
+    for key, value in kept:
+        new_headers.add(key, value)
+    return new_headers
 
 
 @define(auto_attribs=False, repr=False, slots=False)
@@ -208,6 +259,31 @@ class CachedResponse(RichMixin, BaseResponse):
         """Set a new expiration for this response"""
         self.expires = get_expiration_datetime(expire_after)
         return self.is_expired
+
+    def remove_cookies(self, cookie_names: Iterable[str]):
+        """Remove cookies with the given names from this response, including the cookie jar,
+        ``Set-Cookie`` headers, and any redirects in ``history``.
+
+        The jar and headers are copied before modification, so the original response object this
+        may have been created from is unaffected.
+        """
+        names = set(cookie_names or [])
+        if not names:
+            return
+
+        jar = RequestsCookieJar()
+        for cookie in self.cookies:
+            if cookie.name not in names:
+                jar.set_cookie(cookie)
+        self.cookies = jar
+        self.headers = _filter_header_cookies(self.headers, names)
+
+        raw_headers = getattr(self.raw, 'headers', None)
+        if raw_headers is not None and hasattr(raw_headers, 'iteritems'):
+            self.raw.headers = _filter_raw_header_cookies(raw_headers, names)
+
+        for redirect in self.history:
+            redirect.remove_cookies(names)
 
     @property
     def size(self) -> int:
