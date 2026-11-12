@@ -7,12 +7,14 @@ import json
 
 import pytest
 from requests import Request, Response
+from requests.cookies import RequestsCookieJar
 from urllib3 import HTTPResponse
 from unittest.mock import patch
 
 from requests_cache.cache_keys import (
     MAX_NORM_BODY_SIZE,
     create_key,
+    filter_cookies,
     normalize_headers,
     normalize_request,
     redact_response,
@@ -260,3 +262,101 @@ def test_remove_ignored_headers__empty():
         headers={'foo': 'bar'},
     )
     assert normalize_request(request.prepare(), ignored_parameters=None).headers == request.headers
+
+
+def test_create_key__ignored_param_with_duplicate_multivalue_params():
+    """Two requests with different short-lived credential values but the same multi-value tag
+    set must produce the same key; changing the tag set must produce a different key. The
+    duplicate ``tag`` entries must not be collapsed into a single value.
+    """
+    ignored = ['access_token']
+    request_1 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg?tag=a&tag=b&access_token=token-1',
+    )
+    request_2 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg?tag=a&tag=b&access_token=token-2',
+    )
+    request_3 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg?tag=a&tag=c&access_token=token-3',
+    )
+
+    norm_1 = normalize_request(request_1, ignored)
+    norm_3 = normalize_request(request_3, ignored)
+    assert 'tag=a&tag=b' in norm_1.url
+    assert 'access_token=REDACTED' in norm_1.url
+    assert 'tag=a&tag=c' in norm_3.url
+
+    assert create_key(request_1, ignored) == create_key(request_2, ignored)
+    assert create_key(request_1, ignored) != create_key(request_3, ignored)
+
+
+def test_create_key__ignored_param_with_multivalue_params_as_list():
+    """The same guarantee holds when requests receives multi-value params as a list of pairs."""
+    ignored = ['access_token']
+    request_1 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg',
+        params=[('tag', 'a'), ('tag', 'b'), ('access_token', 'token-1')],
+    )
+    request_2 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg',
+        params=[('tag', 'a'), ('tag', 'b'), ('access_token', 'token-2')],
+    )
+    request_3 = Request(
+        method='GET',
+        url='https://img.site.com/base/img.jpg',
+        params=[('tag', 'a'), ('tag', 'c'), ('access_token', 'token-3')],
+    )
+
+    assert create_key(request_1, ignored) == create_key(request_2, ignored)
+    assert create_key(request_1, ignored) != create_key(request_3, ignored)
+    assert 'tag=a&tag=b' in normalize_request(request_1, ignored).url
+
+
+def test_filter_cookies__redacts_ignored_values():
+    cookies = RequestsCookieJar()
+    cookies.set('session_id', 'secret-value', domain='img.site.com', path='/')
+    cookies.set('keep', 'visible', domain='img.site.com', path='/')
+
+    filtered = filter_cookies(cookies, ['session_id'])
+
+    assert filtered.get('session_id') == 'REDACTED'
+    assert filtered.get('keep') == 'visible'
+    assert 'secret-value' not in str(dict(filtered.items()))
+
+
+def test_filter_cookies__no_ignored_params_returns_original():
+    cookies = RequestsCookieJar()
+    cookies.set('keep', 'visible', domain='img.site.com', path='/')
+    assert filter_cookies(cookies, None) is cookies
+
+
+def test_redact_response__ignored_cookies():
+    """Ignored parameters supplied as cookies must not be persisted in the cached request or
+    response representation.
+    """
+    url = 'https://img.site.com/base/img.jpg?tag=a&tag=b'
+    request = Request(
+        method='GET',
+        url=url,
+        cookies={'session_id': 'secret-request-cookie'},
+    ).prepare()
+    response = Response()
+    response.url = url
+    response.request = request
+    response.raw = HTTPResponse(request_url=url)
+    response.cookies.set('session_id', 'secret-response-cookie', domain='img.site.com', path='/')
+
+    redacted_response = redact_response(response, ['session_id'])
+
+    assert redacted_response.request._cookies.get('session_id') == 'REDACTED'
+    assert redacted_response.cookies.get('session_id') == 'REDACTED'
+    assert 'secret-request-cookie' not in str(dict(redacted_response.request._cookies.items()))
+    assert 'secret-response-cookie' not in str(dict(redacted_response.cookies.items()))
+    assert redacted_response.request.headers['Cookie'] == 'session_id=REDACTED'
+    # Non-cookie fields remain intact, including the duplicate query tags
+    assert 'tag=a&tag=b' in redacted_response.request.url

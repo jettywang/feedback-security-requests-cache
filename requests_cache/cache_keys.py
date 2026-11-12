@@ -26,6 +26,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from requests import Request, Session
+from requests.cookies import RequestsCookieJar
 from requests.structures import CaseInsensitiveDict
 from url_normalize import url_normalize
 
@@ -248,7 +249,59 @@ def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> 
             filter_sort_dict(response.request.headers, ignored_parameters)
         )
         response.request.body = normalize_body(response.request, ignored_parameters)
+        response.cookies = filter_cookies(response.cookies, ignored_parameters)
+        _redact_request_cookies(response.request, ignored_parameters)
     return response
+
+
+def _redact_request_cookies(request: AnyPreparedRequest, ignored_parameters: ParamList) -> None:
+    """Redact ignored cookies from both the request cookie jar and the raw ``Cookie`` header.
+    A plain ``requests.PreparedRequest`` exposes the jar as ``_cookies`` rather than ``cookies``.
+    """
+    cookie_jar = getattr(request, 'cookies', None)
+    if cookie_jar is None:
+        cookie_jar = getattr(request, '_cookies', None)
+    if cookie_jar is not None:
+        redacted_jar = filter_cookies(cookie_jar, ignored_parameters)
+        if hasattr(request, 'cookies'):
+            request.cookies = redacted_jar
+        else:
+            request._cookies = redacted_jar
+    if 'Cookie' in request.headers:
+        request.headers['Cookie'] = redact_cookie_header(
+            request.headers['Cookie'], ignored_parameters
+        )
+
+
+def redact_cookie_header(value: str, ignored_parameters: ParamList) -> str:
+    """Redact ignored cookie names from a raw ``Cookie`` request header"""
+    ignored_parameters = set(ignored_parameters or [])
+    pairs = []
+    for item in value.split(';'):
+        name = item.partition('=')[0].strip()
+        if name in ignored_parameters:
+            pairs.append(f'{name}=REDACTED')
+        else:
+            pairs.append(item.strip())
+    return '; '.join(pairs)
+
+
+def filter_cookies(
+    cookies: RequestsCookieJar,
+    ignored_parameters: ParamList = None,
+) -> RequestsCookieJar:
+    """Filter ignored parameters out of a cookie jar. Values are redacted rather than removed so
+    the cookie's presence still matches, mirroring the handling of headers and query params.
+    """
+    ignored_parameters = set(ignored_parameters or [])
+    if not ignored_parameters:
+        return cookies
+    filtered = RequestsCookieJar()
+    for cookie in cookies:
+        if cookie.name in ignored_parameters:
+            cookie.value = 'REDACTED'
+        filtered.set_cookie(cookie)
+    return filtered
 
 
 def filter_sort_json(data: Union[List, Mapping], ignored_parameters: ParamList):

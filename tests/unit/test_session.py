@@ -10,7 +10,7 @@ from pathlib import Path
 from pickle import PickleError
 from time import sleep, time
 from unittest.mock import patch
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlparse, urlencode
 
 import pytest
 import requests
@@ -197,6 +197,59 @@ def test_all_methods__ignored_parameters__redacted(field, method, mock_session):
     elif field == 'json':
         body = json.loads(body)
         assert body['ignored'] == 'REDACTED'
+
+
+def test_ignored_parameters__multivalue_tags_and_cookie_credential(mock_session):
+    """Two requests with different short-lived credential values but the same multi-value tag
+    set must share a cache key; a different tag set gets a different key. Neither the credential
+    value nor a collapsed tag list may appear in the saved or read-back request representation.
+    """
+    mock_session.settings.ignored_parameters = ['access_token', 'session_id']
+    tag_url = f'{MOCKED_URL}?tag=a&tag=b'
+
+    first = mock_session.get(tag_url, params={'access_token': 'token-1'},
+                             cookies={'session_id': 'cookie-secret-1'})
+    second = mock_session.get(tag_url, params={'access_token': 'token-2'},
+                              cookies={'session_id': 'cookie-secret-2'})
+    assert first.from_cache is False
+    assert second.from_cache is True
+
+    # Changing one of the duplicate tag values must produce a different key / cache entry
+    other = mock_session.get(f'{MOCKED_URL}?tag=a&tag=c', params={'access_token': 'token-3'},
+                             cookies={'session_id': 'cookie-secret-3'})
+    assert other.from_cache is False
+
+    cached = mock_session.cache.get_response(mock_session.cache.create_key(second.request))
+    assert cached is not None
+    query_pairs = parse_qsl(urlparse(cached.request.url).query)
+    assert ('tag', 'a') in query_pairs and ('tag', 'b') in query_pairs
+    assert dict(query_pairs).get('access_token') == 'REDACTED'
+    assert cached.request.cookies.get('session_id') == 'REDACTED'
+
+    for secret in ('token-1', 'token-2', 'cookie-secret-1', 'cookie-secret-2'):
+        assert secret not in cached.request.url
+        assert secret not in str(dict(cached.request.cookies.items()))
+        assert secret not in str(dict(cached.request.headers.items()))
+
+
+def test_ignored_parameters__response_cookies_redacted(mock_session):
+    """Cookies set by the response (Set-Cookie) whose names are ignored must also be redacted
+    from the cached response representation.
+    """
+    mock_session.settings.ignored_parameters = ['session_id']
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Set-Cookie': 'session_id=response-secret; Path=/'},
+        text='mock response',
+        status_code=200,
+    )
+    mock_session.get(MOCKED_URL)
+    cached = mock_session.cache.get_response(mock_session.cache.create_key(
+        Request('GET', MOCKED_URL).prepare()
+    ))
+    assert cached.cookies.get('session_id') == 'REDACTED'
+    assert 'response-secret' not in str(dict(cached.cookies.items()))
 
 
 # Variations of relevant request arguments
