@@ -294,6 +294,41 @@ You can also combine this with `stale_if_error` to return cached responses even 
 200
 ```
 
+### Offline Preview Mode
+For a stricter read-only view of locally saved documents (for example, an offline preview of
+financial records), use the `offline_preview()` context manager:
+
+* Only previously cached responses are used; the origin server is **never** contacted, including
+  conditional (revalidation) requests.
+* Nothing is written to the cache, so reading a preview never refreshes or extends a stored
+  response's expiration.
+* Expired responses are hidden by default and are only returned when you pass
+  `allow_stale=True` as explicit approval.
+* When no usable record exists locally, you get a `504` response with `offline_miss=True` and the
+  reason phrase `Offline Unavailable`, which is distinguishable from a generic cache-only miss.
+
+```python
+>>> with session.offline_preview():
+...     response = session.get('https://httpbin.org/get')
+...     if response.offline_miss:
+...         print('No locally saved document available')
+504
+```
+
+Expired records require explicit approval:
+```python
+>>> with session.offline_preview(allow_stale=True):
+...     response = session.get('https://httpbin.org/get')
+>>> response.status_code
+200
+>>> response.is_expired
+True
+```
+
+The same policy can also be configured directly on the session via the `offline` and
+`allow_stale` settings. Normal session behavior is restored automatically when the context
+manager exits.
+
 ```{warning}
 Cached request matching is not solely dependent on the request method, URL, parameters,
 and body. Installed dependencies may also affect cache hits/misses.

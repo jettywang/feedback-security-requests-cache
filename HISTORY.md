@@ -1,6 +1,7 @@
 # History
 
 ## Unreleased
+* Add offline preview mode via `CachedSession.offline_preview()` and the `offline` / `allow_stale` settings: only read locally saved responses, never contact the origin (including conditional requests), hide expired records unless explicitly approved, and return a distinguishable `504` miss (`response.offline_miss`) without refreshing cached expiration
 * Fix `ValueError` when a response has an invalid `Expires` date (for example `Expires: garbage`); it is now treated as already expired
 * Fix JSON refresh comparisons for mixed-case `Content-Type` values
 * Keep caller-supplied MongoDB clients open when closing MongoDB or GridFS caches

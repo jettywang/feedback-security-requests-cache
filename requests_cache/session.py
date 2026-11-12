@@ -244,8 +244,19 @@ class CacheMixin(MIXIN_BASE):
                 cached_response = vary_cached
 
         # Handle missing and expired responses based on settings and headers
+        if self.settings.offline and (
+            actions.send_request or actions.resend_request or actions.resend_async
+        ):
+            # Defense in depth: offline preview must never reach the origin, including conditional
+            # requests, so treat anything that would leave the cache as a local cache miss
+            logger.debug(f'Offline preview blocked outgoing request for URL: {request.url}')
+            actions.error_504 = True
+            actions.send_request = False
+            actions.resend_request = False
+            actions.resend_async = False
+
         if actions.error_504:
-            response: AnyResponse = get_504_response(request)
+            response: AnyResponse = get_504_response(request, offline=self.settings.offline)
         elif actions.resend_async:
             self._resend_async(request, actions, cached_response, **kwargs)
             response = cached_response  # type: ignore
@@ -366,6 +377,42 @@ class CacheMixin(MIXIN_BASE):
             finally:
                 self.settings.disabled = False
 
+    @contextmanager
+    def offline_preview(self, allow_stale: bool = False):
+        """Context manager for offline preview mode.
+
+        While active, the session only reads previously saved responses from the local cache and
+        never contacts the origin server (including conditional/revalidation requests). Reading a
+        cached response does not modify or extend its stored lifetime. Expired records are hidden by
+        default and are only returned when ``allow_stale=True`` is passed as explicit approval.
+        A request that cannot be fulfilled locally returns a distinguishable
+        :py:func:`504 Not Cached <get_504_response>` response (``response.offline_miss`` is
+        ``True``), instead of raising or going upstream.
+
+        .. warning:: This method is not thread-safe.
+
+        Example:
+
+            >>> s = CachedSession()
+            >>> with s.offline_preview():
+            ...     response = s.get('https://httpbin.org/ip')
+            ...     if response.offline_miss:
+            ...         ...  # No locally saved document available
+
+        Args:
+            allow_stale: Explicitly approve showing expired (stale) cached responses
+        """
+        settings = self.settings
+        previous = (settings.offline, settings.allow_stale, settings.read_only)
+        settings.offline = True
+        settings.allow_stale = allow_stale
+        # Preview sessions must never persist anything, even if the underlying session is writable
+        settings.read_only = True
+        try:
+            yield self
+        finally:
+            settings.offline, settings.allow_stale, settings.read_only = previous
+
     def close(self):
         """Close the session and any open backend connections"""
         super().close()
@@ -419,11 +466,18 @@ class CachedSession(CacheMixin, OriginalSession):
     """
 
 
-def get_504_response(request: PreparedRequest) -> CachedResponse:
-    """Get a 504: Not Cached error response, for use with only-if-cached option"""
-    return CachedResponse(
+def get_504_response(request: PreparedRequest, offline: bool = False) -> CachedResponse:
+    """Get a 504: Not Cached error response, for use with only-if-cached and offline preview mode.
+
+    Offline misses additionally set :py:attr:`~requests.Response.offline_miss` to ``True`` and use
+    a distinct reason phrase, so callers can tell apart "nothing saved locally" from a generic
+    cache-only miss without inspecting the request.
+    """
+    response = CachedResponse(
         url=request.url or '',
         status_code=504,
-        reason='Not Cached',
+        reason='Offline Unavailable' if offline else 'Not Cached',
         request=request,  # type: ignore
     )
+    response.offline_miss = offline
+    return response

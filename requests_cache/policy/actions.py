@@ -136,6 +136,14 @@ class CacheActions(RichMixin):
         }
         _log_cache_criteria('read', read_criteria)
 
+        # Offline preview mode: the cache is the only allowed source. Read everything available
+        # locally (including stale items, which are filtered later), but never write anything back
+        offline = settings.offline
+        skip_read = any(read_criteria.values())
+        if offline:
+            skip_read = False
+            only_if_cached = True
+
         actions = cls(
             cache_key=cache_key,
             directives=directives,
@@ -144,8 +152,8 @@ class CacheActions(RichMixin):
             refresh=refresh,
             request=request,
             settings=settings,
-            skip_read=any(read_criteria.values()),
-            skip_write=directives.no_store,
+            skip_read=skip_read,
+            skip_write=directives.no_store or offline,
             stale_if_error=stale_if_error,
             stale_while_revalidate=stale_while_revalidate,
             base_stale_if_error=stale_if_error,
@@ -211,6 +219,12 @@ class CacheActions(RichMixin):
 
         usable_response = self.is_usable(cached_response)
         usable_if_error = self.is_usable(cached_response, error=True)
+        # Explicit approval to show an expired record in offline preview mode. Stale-error
+        # fallbacks never apply here: offline mode cannot produce a network error to fall back on.
+        if self._settings.offline:
+            usable_if_error = False
+            if self._settings.allow_stale:
+                usable_response = cached_response is not None
 
         # Can't satisfy the request
         if not usable_response and self._only_if_cached and not usable_if_error:
@@ -234,7 +248,8 @@ class CacheActions(RichMixin):
         ):
             self.resend_async = True
 
-        if cached_response is not None and not self._only_if_cached:
+        # Offline preview only reads local data: never build conditional (revalidation) requests
+        if cached_response is not None and not self._only_if_cached and not self._settings.offline:
             self._update_validation_headers(cached_response)
         logger.debug(f'Post-read cache actions: {self}')
 

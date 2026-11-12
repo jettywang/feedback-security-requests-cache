@@ -38,6 +38,8 @@ class BaseResponse(Response):
     cache_key: str = ''  # Not serialized; set by BaseCache.get_response()
     revalidated: bool = False  # Not serialized; set by CacheActions.update_revalidated_response()
     has_content_changed: Optional[bool] = None  # Not serialized; set when refreshing a response
+    # Not serialized; set on 504 responses produced by offline preview mode
+    offline_miss: bool = False
 
     @property
     def from_cache(self) -> bool:

@@ -32,6 +32,7 @@ from requests_cache.policy import (
 from requests_cache.policy.actions import METHOD_OVERRIDE_HEADERS
 from requests_cache.session import OriginalSession
 from tests.conftest import (
+    EXPIRED_DT,
     MOCKED_URL,
     MOCKED_URL_200_404,
     MOCKED_URL_404,
@@ -1360,6 +1361,171 @@ def test_request_only_if_cached__prepared_request(mock_session):
     assert response.status_code == 504
     with pytest.raises(HTTPError):
         response.raise_for_status()
+
+
+# Offline preview mode
+# -----------------------------------------------------
+
+
+def _expire_cached_response(session: CachedSession, url: str) -> CachedResponse:
+    """Force the cached response for a URL to be expired without sleeping or time travel"""
+    key = session.cache.create_key(Request('GET', url).prepare())
+    cached_response = session.cache.get_response(key)
+    assert cached_response is not None
+    cached_response.expires = EXPIRED_DT
+    session.cache.responses[key] = cached_response
+    return cached_response
+
+
+def test_offline_preview__miss_is_distinguishable_and_offline(mock_session):
+    """With no saved record, offline preview returns a marked 504 and never reaches the origin"""
+    request_count = mock_session.mock_adapter.call_count
+    with mock_session.offline_preview():
+        response = mock_session.get(MOCKED_URL)
+
+    assert response.status_code == 504
+    assert response.offline_miss is True
+    assert response.reason == 'Offline Unavailable'
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__fresh_hit_stays_local(mock_session):
+    """A fresh saved document is served from the cache without any upstream traffic"""
+    mock_session.get(MOCKED_URL)
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview():
+        response = mock_session.get(MOCKED_URL)
+
+    assert response.status_code == 200
+    assert response.from_cache is True
+    assert response.offline_miss is False
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__stale_hidden_without_approval(mock_session):
+    """Expired records are not shown unless explicitly approved"""
+    mock_session.settings.expire_after = 1
+    mock_session.get(MOCKED_URL)
+    _expire_cached_response(mock_session, MOCKED_URL)
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview():
+        response = mock_session.get(MOCKED_URL)
+
+    assert response.status_code == 504
+    assert response.offline_miss is True
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__stale_shown_with_approval(mock_session):
+    """allow_stale=True is the explicit approval required to surface an expired record"""
+    mock_session.settings.expire_after = 1
+    mock_session.get(MOCKED_URL)
+    _expire_cached_response(mock_session, MOCKED_URL)
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview(allow_stale=True):
+        response = mock_session.get(MOCKED_URL)
+
+    assert response.status_code == 200
+    assert response.from_cache is True
+    assert response.is_expired is True
+    assert response.offline_miss is False
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__stale_hidden_with_approval_required_even_with_stale_if_error(
+    mock_session,
+):
+    """stale_if_error must not surface expired records in preview mode without explicit approval"""
+    mock_session.settings.expire_after = 1
+    mock_session.settings.stale_if_error = True
+    mock_session.get(MOCKED_URL)
+    _expire_cached_response(mock_session, MOCKED_URL)
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview():
+        response = mock_session.get(MOCKED_URL)
+
+    assert response.status_code == 504 and response.offline_miss is True
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__blocks_conditional_requests(mock_session):
+    """Even validation (conditional) requests are blocked; no If-None-Match leaves the session"""
+    mock_session.get(MOCKED_URL_ETAG)
+    _expire_cached_response(mock_session, MOCKED_URL_ETAG)
+    mock_session.settings.always_revalidate = True
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview(allow_stale=True):
+        response = mock_session.get(MOCKED_URL_ETAG, refresh=True)
+
+    assert response.from_cache is True and response.is_expired is True
+    assert mock_session.mock_adapter.call_count == request_count
+    assert not any(
+        req.headers.get('If-None-Match') or req.headers.get('If-Modified-Since')
+        for req in mock_session.mock_adapter.request_history[request_count:]
+    )
+
+
+def test_offline_preview__read_does_not_refresh_expiration(mock_session):
+    """Reading a preview must not write back or extend the stored response's lifetime"""
+    mock_session.settings.expire_after = 1
+    mock_session.get(MOCKED_URL)
+    cached_response = _expire_cached_response(mock_session, MOCKED_URL)
+    original_expires = cached_response.expires
+    request_count = mock_session.mock_adapter.call_count
+
+    with mock_session.offline_preview(allow_stale=True):
+        for _ in range(3):
+            mock_session.get(MOCKED_URL)
+
+    refreshed = mock_session.cache.get_response(cached_response.cache_key)
+    assert refreshed.expires == original_expires
+    assert mock_session.mock_adapter.call_count == request_count
+
+
+def test_offline_preview__does_not_cache_new_responses(mock_session):
+    """Preview mode is read-only: upstream responses cannot be persisted while it is active"""
+    with mock_session.offline_preview():
+        response = mock_session.get(MOCKED_URL)
+        assert response.offline_miss is True
+
+    assert not mock_session.cache.contains(url=MOCKED_URL)
+
+
+def test_offline_preview__restores_previous_settings(mock_session):
+    """Exiting the context manager restores offline, allow_stale and read_only settings"""
+    mock_session.settings.read_only = True
+    with mock_session.offline_preview(allow_stale=True):
+        assert mock_session.settings.offline is True
+        assert mock_session.settings.allow_stale is True
+        assert mock_session.settings.read_only is True
+    assert mock_session.settings.offline is False
+    assert mock_session.settings.allow_stale is False
+    assert mock_session.settings.read_only is True
+
+    # A separate writable session keeps its normal behavior after a preview
+    mock_session.settings.read_only = False
+    response = mock_session.get(MOCKED_URL)
+    assert response.from_cache is False
+    assert mock_session.cache.contains(url=MOCKED_URL)
+
+
+def test_offline_preview__session_level_settings(mock_session):
+    """The same policy can be configured directly on the session settings"""
+    mock_session.settings.expire_after = 1
+    mock_session.get(MOCKED_URL)
+    _expire_cached_response(mock_session, MOCKED_URL)
+
+    mock_session.settings.offline = True
+    mock_session.settings.allow_stale = True
+    request_count = mock_session.mock_adapter.call_count
+    response = mock_session.get(MOCKED_URL)
+    assert response.from_cache is True and response.is_expired is True
+    assert mock_session.mock_adapter.call_count == request_count
 
 
 def test_revalidation__skip_update(mock_session):
