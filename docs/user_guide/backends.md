@@ -117,6 +117,34 @@ Or, using backend classes directly:
 >>> dest_cache.update(src_cache)
 ```
 
+(restricted-migration)=
+## Restricted Offline Migration
+When you change your persistence policy (for example, after unifying save rules across services),
+{py:meth}`.BaseCache.copy_from` performs a read-only, offline migration that only carries over the
+records allowed by the new policy. Unlike {py:meth}`.BaseCache.update`, it does not blindly copy
+everything:
+
+* Records flagged as non-persistable ({py:attr}`.CachedResponse.no_store`) are never copied.
+* An optional `predicate` lets you encode the new save policy; records for which it returns `False`
+  are skipped.
+* Records that cannot be deserialized are counted as decode failures and left in the source cache.
+* Each accepted record keeps its original cache key and expiration time, and the source cache is
+  never modified or deleted.
+
+The method returns a {py:class}`.CacheCopyResult` reporting the number of records copied, skipped,
+and that failed to decode. Writes are idempotent key replacements, so an interrupted migration can
+be re-run without creating duplicate entries:
+```python
+>>> src_cache = SQLiteCache('old_cache')
+>>> dest_cache = SQLiteCache('new_cache')
+>>> result = dest_cache.copy_from(
+...     src_cache,
+...     predicate=lambda response: response.status_code == 200,
+... )
+>>> print(result)
+CacheCopyResult(copied=42, skipped=3, decode_errors=1)
+```
+
 (custom-backends)=
 ## Custom Backends
 If the built-in backends don't suit your needs, you can create your own by making subclasses of {py:class}`.BaseCache` and {py:class}`.BaseStorage`:

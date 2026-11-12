@@ -12,10 +12,22 @@ from collections import UserDict
 from datetime import datetime
 from logging import getLogger
 from pickle import PickleError
-from typing import TYPE_CHECKING, Iterable, Iterator, List, MutableMapping, Optional, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Iterable,
+    Iterator,
+    List,
+    MutableMapping,
+    Optional,
+    TypeVar,
+    Union,
+)
 from warnings import warn
 
 from pathlib import Path
+
+from attrs import define, field
 
 from requests import Request, Response
 
@@ -28,6 +40,30 @@ from ..serializers import SerializerType, init_serializer
 DESERIALIZE_ERRORS = (AttributeError, EOFError, ImportError, PickleError, TypeError, ValueError)
 
 logger = getLogger(__name__)
+
+# Predicate deciding whether a decoded response satisfies the destination persistence policy
+CopyPredicate = Callable[[CachedResponse], bool]
+
+
+@define
+class CacheCopyResult:
+    """Summary of a restricted, offline cache copy performed by :py:meth:`.BaseCache.copy_from`.
+
+    Attributes:
+        copied: Number of responses written to the destination cache
+        skipped: Number of responses excluded because they failed the predicate or were marked as
+            non-persistable (``no_store``)
+        decode_errors: Number of source records that could not be deserialized and were not copied
+    """
+
+    copied: int = field(default=0)
+    skipped: int = field(default=0)
+    decode_errors: int = field(default=0)
+
+    @property
+    def total(self) -> int:
+        """Total number of source response records examined"""
+        return self.copied + self.skipped + self.decode_errors
 
 
 class BaseCache:
@@ -284,6 +320,74 @@ class BaseCache:
         logger.debug(f'Copying {len(other.responses)} responses from {repr(other)} to {repr(self)}')
         self.responses.update(other.responses)
         self.redirects.update(other.redirects)
+
+    def copy_from(
+        self,
+        source: 'BaseCache',
+        predicate: Optional[CopyPredicate] = None,
+    ) -> CacheCopyResult:
+        """Offline, read-only migration of selected records from ``source`` into this cache.
+
+        Only records that satisfy the destination persistence policy are copied:
+
+        * Records flagged as non-persistable (``no_store``) are never copied.
+        * If ``predicate`` is given, records for which it returns ``False`` are skipped.
+        * Records that cannot be deserialized are counted as decode failures and left behind.
+
+        The source cache is never modified or deleted. Each accepted response is written with its
+        original cache key and expiration time. Writes use ``INSERT OR REPLACE`` semantics, so
+        re-running an interrupted migration is idempotent: it neither creates duplicate entries nor
+        removes records from the source. Redirect aliases are carried over only when their target
+        response is present in the destination.
+
+        Args:
+            source: The cache to read from; remains readable and is not modified
+            predicate: Optional callable receiving each decoded :py:class:`.CachedResponse` and
+                returning ``True`` if it may be persisted under the new save policy
+
+        Returns:
+            A :py:class:`.CacheCopyResult` with copied, skipped, and decode-failure counts
+        """
+        result = CacheCopyResult()
+        logger.info(f'Copying eligible records from {repr(source)} into {repr(self)}')
+
+        # Snapshot the keys first so writes to the destination never affect iteration of the source
+        for key in list(source.responses.keys()):
+            try:
+                response = source.responses[key]
+            except DESERIALIZE_ERRORS as e:
+                logger.error(f'Unable to deserialize response for key {key}: {str(e)}')
+                result.decode_errors += 1
+                continue
+
+            if response is None:
+                result.decode_errors += 1
+                continue
+            if getattr(response, 'no_store', False):
+                logger.debug(f'Skipping non-persistable response for key {key}')
+                result.skipped += 1
+                continue
+            if predicate is not None and not predicate(response):
+                logger.debug(f'Skipping response rejected by persistence predicate for key {key}')
+                result.skipped += 1
+                continue
+
+            # Reassigning the same key is an idempotent overwrite, not a duplicate; the stored
+            # expiration is part of the response and is preserved on the write.
+            response.cache_key = key
+            self.responses[key] = response
+            result.copied += 1
+
+        # Carry over redirect aliases that resolve to a response present in the destination
+        for redirect_key, target_key in source.redirects.items():
+            if target_key in self.responses:
+                self.redirects[redirect_key] = target_key
+
+        logger.info(
+            f'Cache copy finished: {result.copied} copied, {result.skipped} skipped, '
+            f'{result.decode_errors} decode errors'
+        )
+        return result
 
     def urls(self, **kwargs) -> List[str]:
         """Get all unique cached URLs. Optionally takes keyword arguments for :py:meth:`.filter`."""

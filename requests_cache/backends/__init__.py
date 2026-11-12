@@ -7,7 +7,7 @@ from typing import Callable, Dict, Iterable, Optional, Type, Union
 from warnings import warn
 
 from .._utils import get_placeholder_class, get_valid_kwargs
-from .base import BaseCache, BaseStorage, DictStorage
+from .base import BaseCache, BaseStorage, CacheCopyResult, DictStorage
 
 # Backend-specific keyword arguments equivalent to 'cache_name'
 CACHE_NAME_KWARGS = ['db_path', 'db_name', 'namespace', 'table_name']

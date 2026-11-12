@@ -113,11 +113,19 @@ class CachedResponse(RichMixin, BaseResponse):
     expires: Optional[datetime] = field(default=None, converter=add_tzinfo)
     headers: CaseInsensitiveDict = field(factory=CaseInsensitiveDict)
     history: List['CachedResponse'] = field(factory=list)  # type: ignore
+    # Marks a record that must not be carried into a new, policy-compliant cache (e.g. a response
+    # cached before a unified persistence policy). Serialized, so it survives a cache restart.
+    no_store: bool = field(default=False)
     raw: CachedHTTPResponse = None  # type: ignore  # Not serialized; populated from CachedResponse attrs
     reason: str = field(default=None)
     request: CachedRequest = field(factory=CachedRequest)  # type: ignore
     status_code: int = field(default=0)
     url: str = field(default=None)
+
+    @property
+    def is_persistable(self) -> bool:
+        """Whether this record may be copied to another cache under the current persistence policy"""
+        return not self.no_store
 
     def __attrs_post_init__(self):
         # Not using created_at field default due to possible bug on Windows with omit_if_default
